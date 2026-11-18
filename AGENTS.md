@@ -1,3 +1,9 @@
+## Public repository privacy
+
+Check for secrets and personal data in staged changes before committing and in outgoing commits before pushing. Apply the same check to GitHub issue titles, bodies, comments, and attachments before posting or editing. Remove sensitive content before committing or publishing.
+
+Use synthetic Oura data in examples and test fixtures.
+
 ## Agent skills
 
 ### Issue tracker
