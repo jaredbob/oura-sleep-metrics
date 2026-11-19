@@ -22,7 +22,7 @@ Deno.test("Only the Supabase owner can start Oura consent", async () => {
   );
   equal(owner.ok, true);
   const consent = new URL(JSON.parse(owner.stdout).authorization_url);
-  equal(consent.searchParams.get("scope"), "daily personal");
+  equal(consent.searchParams.get("scope"), "daily personal spo2");
   equal(consent.searchParams.get("code_challenge_method"), "S256");
   equal(Boolean(consent.searchParams.get("state")), true);
 });

@@ -60,11 +60,23 @@ with sleep_scores as (
   select distinct on (owner_id, day) owner_id, day, sleep_score
   from public.oura_daily_sleep
   order by owner_id, day, reported_at desc, document_id desc
+), spo2 as (
+  -- Oura supplies no timestamp for ordering documents for the same day.
+  select distinct on (owner_id, day) owner_id, day, average_spo2
+  from public.oura_daily_spo2
+  order by owner_id, day, document_id desc
+), readiness as (
+  select distinct on (owner_id, day)
+    owner_id, day, readiness_score, temperature_deviation_c
+  from public.oura_daily_readiness
+  order by owner_id, day, reported_at desc, document_id desc
 )
-select owner_id, day, sleep_score,
-       main_sleep.document_id as sleep_session_document_id,
-       main_sleep.average_hrv
+select owner_id, day, sleep_scores.sleep_score, spo2.average_spo2,
+  readiness.readiness_score, readiness.temperature_deviation_c,
+  main_sleep.document_id as sleep_session_document_id, main_sleep.average_hrv
 from sleep_scores
+full join spo2 using (owner_id, day)
+full join readiness using (owner_id, day)
 full join oura_private.main_sleep using (owner_id, day);
 
 insert into oura_private.import_jobs (owner_id, collection, start_day, end_day)

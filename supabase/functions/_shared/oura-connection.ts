@@ -18,7 +18,7 @@ export async function beginConsent(ownerId: string): Promise<string> {
     response_type: "code",
     client_id: requiredEnv("OURA_CLIENT_ID"),
     redirect_uri: requiredEnv("OURA_REDIRECT_URI"),
-    scope: "daily personal",
+    scope: "daily personal spo2",
     state,
     code_challenge: codeChallenge,
     code_challenge_method: "S256",

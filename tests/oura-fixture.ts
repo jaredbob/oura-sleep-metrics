@@ -8,27 +8,29 @@ import {
   webhookFixtureStats,
 } from "./oura-webhook-fixture.ts";
 
-type Consent = { challenge: string; uri: string; account: string };
-type Token = { account: string; active: boolean };
+type Grant = { account: string; scopes: string[] };
+type Consent = Grant & { challenge: string; uri: string };
+type Token = Grant & { active: boolean };
 
 const consents = new Map<string, Consent>();
 const accessTokens = new Map<string, Token>();
-const refreshTokens = new Map<string, string>();
+const refreshTokens = new Map<string, Grant>();
 
 let sequence = 0;
 let account = "synthetic-oura-account";
 let failPage: number | null = null;
 let rejectRefresh = false;
+let declinedScope: string | null = null;
 let exchanges = 0;
 let refreshes = 0;
 let historyAttempts: number[] = [];
 
-function issueTokens(accountId: string): Response {
+function issueTokens({ account, scopes }: Grant): Response {
   sequence++;
   const access = `synthetic-access-${sequence}`;
   const refresh = `synthetic-refresh-${sequence}`;
-  accessTokens.set(access, { account: accountId, active: true });
-  refreshTokens.set(refresh, accountId);
+  accessTokens.set(access, { account, scopes, active: true });
+  refreshTokens.set(refresh, { account, scopes });
   return Response.json({
     token_type: "bearer",
     access_token: access,
@@ -67,6 +69,7 @@ export async function ouraFixture(req: Request): Promise<Response> {
     account = "synthetic-oura-account";
     failPage = null;
     rejectRefresh = false;
+    declinedScope = null;
     exchanges = 0;
     refreshes = 0;
     historyAttempts = [];
@@ -79,6 +82,7 @@ export async function ouraFixture(req: Request): Promise<Response> {
     if ("fail_page" in config) failPage = config.fail_page;
     if ("account_id" in config) account = config.account_id;
     if ("reject_refresh" in config) rejectRefresh = config.reject_refresh;
+    if ("decline_scope" in config) declinedScope = config.decline_scope;
     if (config.reject_access) {
       for (const token of accessTokens.values()) token.active = false;
     }
@@ -103,7 +107,10 @@ export async function ouraFixture(req: Request): Promise<Response> {
       searchParams.get("code_challenge_method") !== "S256"
     ) return Response.json({ error: "invalid_request" }, { status: 400 });
     const code = `synthetic-code-${++sequence}`;
-    consents.set(code, { challenge, uri, account });
+    const scopes = (searchParams.get("scope") ?? "").split(" ").filter((
+      scope,
+    ) => scope !== declinedScope);
+    consents.set(code, { challenge, uri, account, scopes });
     const callback = new URL(uri);
     callback.searchParams.set("code", code);
     callback.searchParams.set("state", state);
@@ -136,17 +143,17 @@ export async function ouraFixture(req: Request): Promise<Response> {
         consent.challenge !== challenge
       ) return Response.json({ error: "invalid_grant" }, { status: 400 });
       consents.delete(code);
-      return issueTokens(consent.account);
+      return issueTokens(consent);
     }
     if (grant === "refresh_token") {
       refreshes++;
       const refresh = parameters.get("refresh_token") ?? "";
-      const refreshAccount = refreshTokens.get(refresh);
-      if (rejectRefresh || !refreshAccount) {
+      const refreshGrant = refreshTokens.get(refresh);
+      if (rejectRefresh || !refreshGrant) {
         return Response.json({ error: "invalid_grant" }, { status: 400 });
       }
       refreshTokens.delete(refresh);
-      return issueTokens(refreshAccount);
+      return issueTokens(refreshGrant);
     }
     return Response.json({ error: "unsupported_grant_type" }, { status: 400 });
   }
@@ -162,6 +169,12 @@ export async function ouraFixture(req: Request): Promise<Response> {
 
   if (pathname === "/v2/usercollection/personal_info") {
     return Response.json({ id: token.account });
+  }
+  if (
+    /^\/v2\/usercollection\/daily_spo2(?:\/|$)/.test(pathname) &&
+    !token.scopes.includes("spo2")
+  ) {
+    return Response.json({ error: "insufficient_scope" }, { status: 403 });
   }
   const configuredHistory = historyFixture(url);
   if (pathname === "/v2/usercollection/daily_sleep") {
