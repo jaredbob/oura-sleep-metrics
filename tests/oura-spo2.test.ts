@@ -46,7 +46,33 @@ Deno.test("Reconnect grants Overnight SpO₂ and imports history alongside exist
     },
   });
   equal((await fetch(await authorize(owner))).status, 200);
-  await command(owner, "import");
+  const interrupted = await command(owner, "import");
+  equal(interrupted.ok, false);
+  const { history } = JSON.parse(interrupted.stdout);
+  equal({
+    status: history.status,
+    pages_imported: history.pages_imported,
+    pending: history.pending,
+    retryable: history.retryable,
+    complete: history.complete,
+  }, {
+    status: "retryable",
+    pages_imported: 4,
+    pending: 0,
+    retryable: 1,
+    complete: 3,
+  });
+  equal(
+    history.collections.map((
+      { collection, status }: { collection: string; status: string },
+    ) => [collection, status]),
+    [
+      ["daily_readiness", "complete"],
+      ["daily_sleep", "complete"],
+      ["daily_spo2", "retryable"],
+      ["sleep", "complete"],
+    ],
+  );
   const sleepBeforeReconnect = {
     status: 200,
     rows: [
