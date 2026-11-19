@@ -1,7 +1,11 @@
 import { requiredEnv } from "../_shared/db.ts";
-import { ensureSubscriptions } from "../_shared/webhook-subscriptions.ts";
+import {
+  ensureSubscriptions,
+  renewSubscriptions,
+} from "../_shared/webhook-subscriptions.ts";
 import { runWebhookWork } from "../_shared/webhook-work.ts";
-import { getConnectionStatus, runHistoryImport } from "../_shared/history.ts";
+import { runHistoryImport } from "../_shared/history.ts";
+import { getConnectionStatus } from "../_shared/sync-status.ts";
 import { HttpError, json } from "../_shared/http.ts";
 import { beginConsent, finishConsent } from "../_shared/oura-connection.ts";
 import { requireOwner } from "../_shared/owner.ts";
@@ -39,6 +43,7 @@ export async function handleOuraOAuth(req: Request): Promise<Response> {
       const ownerId = requiredEnv("OURA_OWNER_ID");
       const completed = await Promise.allSettled([
         runWebhookWork(ownerId),
+        renewSubscriptions(),
         syncInitialHistory(ownerId, 1, true),
       ]);
       if (completed.some((result) => result.status === "rejected")) {
@@ -68,7 +73,9 @@ export async function handleOuraOAuth(req: Request): Promise<Response> {
       return json(await getConnectionStatus(await requireOwner(req)));
     }
     if (route === "/import" && req.method === "POST") {
-      return json(await syncInitialHistory(await requireOwner(req)));
+      const ownerId = await requireOwner(req);
+      await syncInitialHistory(ownerId);
+      return json(await getConnectionStatus(ownerId));
     }
     return json({ error: "Oura route not found." }, 404);
   } catch (error) {
@@ -96,7 +103,7 @@ async function syncInitialHistory(
   scheduled = false,
 ) {
   await ensureSubscriptions(ownerId);
-  return await runHistoryImport(ownerId, pageLimit, scheduled);
+  await runHistoryImport(ownerId, pageLimit, scheduled);
 }
 
 function background(work: () => Promise<unknown>) {

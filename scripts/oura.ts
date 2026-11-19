@@ -3,6 +3,7 @@ type HistoryStatus = {
   history: {
     status: "pending" | "complete" | "retryable";
     pages_imported: number;
+    pending: number;
   } | null;
 };
 
@@ -84,14 +85,18 @@ async function main() {
   while (true) {
     const status = await api<HistoryStatus>("import", "POST");
     const progress = status.history;
-    if (status.connection !== "connected" || progress?.status !== "pending") {
+    const stalled = progress?.pages_imported === previous;
+    if (
+      status.connection !== "connected" || !progress?.pending ||
+      (stalled && progress.status === "retryable")
+    ) {
       console.log(JSON.stringify(status));
       if (
         status.connection !== "connected" || progress?.status === "retryable"
       ) Deno.exitCode = 1;
       return;
     }
-    if (progress.pages_imported <= previous) {
+    if (stalled) {
       throw new Error("Oura history import made no progress.");
     }
     previous = progress.pages_imported;

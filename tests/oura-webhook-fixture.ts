@@ -1,3 +1,5 @@
+import { signedNotification } from "./oura-test-support.ts";
+
 type Subscription = {
   id: string;
   callback_url: string;
@@ -12,6 +14,9 @@ type HistoryPage = { data: SyntheticDocument[]; next_token: string | null };
 const userCollectionPath = /^\/v2\/usercollection\/([^/]+)(?:\/([^/]+))?$/;
 const subscriptionPath = "/v2/webhook/subscription";
 const subscriptions: Subscription[] = [];
+let renewals: string[] = [];
+let renewalFailures: string[] = [];
+let subscriptionLifetimes: Record<string, number> = {};
 let documentAttempts: string[] = [];
 let documents = new Map<string, SyntheticDocument | null>();
 const collections = new Map<string, HistoryPage[]>();
@@ -31,6 +36,27 @@ export async function subscriptionFixture(
   if (pathname === subscriptionPath && req.method === "GET") {
     return Response.json(subscriptions);
   }
+  if (
+    pathname.startsWith(subscriptionPath + "/renew/") && req.method === "PUT"
+  ) {
+    const id = decodeURIComponent(
+      pathname.slice((subscriptionPath + "/renew/").length),
+    );
+    const subscription = subscriptions.find((entry) => entry.id === id);
+    if (
+      !subscription || Date.parse(subscription.expiration_time) <= Date.now()
+    ) {
+      return Response.json({ error: "unknown_subscription" }, { status: 403 });
+    }
+    const key = `${subscription.data_type}/${subscription.event_type}`;
+    renewals.push(key);
+    if (renewalFailures.includes(key)) {
+      return Response.json({ error: "temporary_failure" }, { status: 503 });
+    }
+    subscription.expiration_time = new Date(Date.now() + 30 * 86_400_000)
+      .toISOString();
+    return Response.json(subscription);
+  }
   if (pathname === subscriptionPath && req.method === "POST") {
     const body = await req.json();
     const url = new URL(body.callback_url);
@@ -41,12 +67,15 @@ export async function subscriptionFixture(
     if (!verified.ok || (await verified.json()).challenge !== challenge) {
       return Response.json({ error: "verification_failed" }, { status: 422 });
     }
+    const lifetime =
+      subscriptionLifetimes[`${body.data_type}/${body.event_type}`] ??
+        30 * 86_400_000;
     const subscription: Subscription = {
       id: crypto.randomUUID(),
       callback_url: body.callback_url,
       event_type: body.event_type,
       data_type: body.data_type,
-      expiration_time: new Date(Date.now() + 86_400_000).toISOString(),
+      expiration_time: new Date(Date.now() + lifetime).toISOString(),
     };
     subscriptions.push(subscription);
     return Response.json(subscription, { status: 201 });
@@ -56,8 +85,27 @@ export async function subscriptionFixture(
   });
 }
 
+export async function deliverWebhookFixture(
+  event: Record<string, unknown>,
+): Promise<Response> {
+  const subscription = subscriptions.find((entry) =>
+    entry.data_type === event.data_type &&
+    entry.event_type === event.event_type &&
+    Date.parse(entry.expiration_time) > Date.now()
+  );
+  if (!subscription) return Response.json({ status: 404 });
+  const delivered = await fetch(
+    subscription.callback_url,
+    await signedNotification(event),
+  );
+  return Response.json({ status: delivered.status });
+}
+
 export function resetWebhookFixture() {
   subscriptions.length = 0;
+  renewals = [];
+  renewalFailures = [];
+  subscriptionLifetimes = {};
   documentAttempts = [];
   documents.clear();
   collections.clear();
@@ -67,6 +115,15 @@ export function resetWebhookFixture() {
 }
 
 export function configureWebhookFixture(config: Record<string, unknown>) {
+  if ("subscription_lifetimes" in config) {
+    subscriptionLifetimes = config.subscription_lifetimes as Record<
+      string,
+      number
+    >;
+  }
+  if ("renewal_failures" in config) {
+    renewalFailures = config.renewal_failures as string[];
+  }
   if ("documents" in config) {
     documents = new Map(
       Object.entries(
@@ -93,6 +150,7 @@ export function configureWebhookFixture(config: Record<string, unknown>) {
 export function webhookFixtureStats() {
   return {
     subscriptions,
+    renewals,
     document_attempts: documentAttempts,
     history_held: releaseHistory !== undefined,
   };

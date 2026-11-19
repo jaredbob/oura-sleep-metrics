@@ -57,7 +57,12 @@ Deno.test("Consent binds the owner, serializes refresh, and resumes paginated Sl
   for (const result of interrupted) equal(result.ok, false);
   status = JSON.parse((await command(owner, "status")).stdout);
   equal(status.history.status, "retryable");
-  equal(status.history.pages_imported, 1);
+  equal(
+    status.history.collections.find(
+      (job: { collection: string }) => job.collection === "daily_sleep",
+    ).pages_imported,
+    1,
+  );
   equal((await fixture("stats")).refreshes, 1);
   equal((await readSql("oura_nightly", "day,sleep_score", owner)).rows, [
     { day: "2024-03-10", sleep_score: 82 },
@@ -88,7 +93,12 @@ Deno.test("Consent binds the owner, serializes refresh, and resumes paginated Sl
   equal((await command(owner, "import")).ok, true);
   status = JSON.parse((await command(owner, "status")).stdout);
   equal(status.history.status, "complete");
-  equal(status.history.pages_imported, 2);
+  equal(
+    status.history.collections.find(
+      (job: { collection: string }) => job.collection === "daily_sleep",
+    ).pages_imported,
+    2,
+  );
   const nightly = await readSql("oura_nightly", "day,sleep_score", owner);
   equal(nightly, {
     status: 200,

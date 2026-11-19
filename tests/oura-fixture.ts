@@ -1,5 +1,6 @@
 import {
   configureWebhookFixture,
+  deliverWebhookFixture,
   documentFixture,
   historyFixture,
   holdHistory,
@@ -83,6 +84,9 @@ export async function ouraFixture(req: Request): Promise<Response> {
       for (const token of accessTokens.values()) token.active = false;
     }
     return Response.json({});
+  }
+  if (pathname === "/fixture/deliver" && req.method === "POST") {
+    return await deliverWebhookFixture(await req.json());
   }
   if (pathname === "/fixture/stats") {
     return Response.json({

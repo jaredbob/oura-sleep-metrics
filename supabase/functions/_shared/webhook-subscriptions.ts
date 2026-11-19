@@ -5,8 +5,21 @@ import { ouraApiFetch } from "./oura-api.ts";
 import { eventRanks } from "./webhook.ts";
 
 const subscriptionPath = "/v2/webhook/subscription";
+const renewalLeadSeconds = 24 * 60 * 60;
 
 type EventType = keyof typeof eventRanks;
+
+type RegisteredSubscription = {
+  collection: string;
+  event_type: EventType;
+  expires_at: Date;
+};
+
+type LocalSubscriptionStatus = RegisteredSubscription & {
+  renewal_retry_at: Date | null;
+  expired: boolean;
+  renewal_due: boolean;
+};
 
 type Subscription = {
   id: string;
@@ -111,7 +124,8 @@ export async function ensureSubscriptions(ownerId: string): Promise<void> {
       )
     }
       on conflict (collection, event_type) do update
-      set provider_id = excluded.provider_id, callback_url = excluded.callback_url, expires_at = excluded.expires_at
+      set provider_id = excluded.provider_id, callback_url = excluded.callback_url, expires_at = excluded.expires_at,
+          renewal_attempts = 0, renewal_retry_at = null
     `;
 
     // Restart any previously started history once the missing coverage is in place.
@@ -125,6 +139,92 @@ export async function ensureSubscriptions(ownerId: string): Promise<void> {
       )
     }::text[])
     `;
+  });
+}
+
+export async function renewSubscriptions(): Promise<void> {
+  await sql().begin(async (tx) => {
+    await tx`select pg_advisory_xact_lock(hashtext('oura_webhook_subscriptions'))`;
+    const callbackUrl = webhookUrl();
+    const due = await tx<(RegisteredSubscription & { provider_id: string })[]>`
+      select collection, event_type, provider_id, expires_at
+      from oura_private.webhook_subscriptions
+      where callback_url = ${callbackUrl} and expires_at > now()
+        and expires_at <= now() + make_interval(secs => ${renewalLeadSeconds})
+        and (renewal_retry_at is null or renewal_retry_at <= now())
+    `;
+    const results = await Promise.allSettled(
+      due.map(async (subscription) => {
+        const response = parseSubscription(
+          await subscriptionRequest(
+            `${subscriptionPath}/renew/${
+              encodeURIComponent(subscription.provider_id)
+            }`,
+            { method: "PUT" },
+          ),
+        );
+        if (
+          !response ||
+          response.callback_url !== callbackUrl ||
+          response.data_type !== subscription.collection ||
+          response.event_type !== subscription.event_type ||
+          Date.parse(response.expiration_time) <= Math.max(
+              Date.now(),
+              subscription.expires_at.getTime(),
+            )
+        ) throw new Error("Invalid Oura subscription renewal.");
+        return response;
+      }),
+    );
+    for (const [index, result] of results.entries()) {
+      const { collection, event_type } = due[index];
+      if (result.status === "fulfilled") {
+        await tx`
+          update oura_private.webhook_subscriptions
+          set provider_id = ${result.value.id}, expires_at = ${result.value.expiration_time},
+              renewal_attempts = 0, renewal_retry_at = null
+          where collection = ${collection} and event_type = ${event_type}
+        `;
+      } else {
+        await tx`
+          update oura_private.webhook_subscriptions
+          set renewal_attempts = renewal_attempts + 1,
+              renewal_retry_at = clock_timestamp() + make_interval(
+                secs => least(900, power(2, least(renewal_attempts + 1, 10)))
+              )
+          where collection = ${collection} and event_type = ${event_type}
+        `;
+      }
+    }
+  });
+}
+
+export async function getSubscriptionStatus() {
+  const registered = await sql()<LocalSubscriptionStatus[]>`
+    select collection, event_type, expires_at, renewal_retry_at,
+           expires_at <= now() as expired,
+           expires_at <= now() + make_interval(secs => ${renewalLeadSeconds}) as renewal_due
+    from oura_private.webhook_subscriptions
+    where callback_url = ${webhookUrl()}
+  `;
+  return desiredSubscriptions.map(({ data_type, event_type }) => {
+    const cached = registered.find((row) =>
+      row.collection === data_type && row.event_type === event_type
+    );
+    let status = "pending";
+    if (cached) {
+      if (cached.expired) status = "expired";
+      else if (cached.renewal_retry_at) status = "retryable";
+      else if (cached.renewal_due) status = "renewal_pending";
+      else status = "active";
+    }
+    return {
+      collection: data_type,
+      event_type,
+      status,
+      expires_at: cached?.expires_at ?? null,
+      retry_at: status === "retryable" ? cached?.renewal_retry_at : null,
+    };
   });
 }
 

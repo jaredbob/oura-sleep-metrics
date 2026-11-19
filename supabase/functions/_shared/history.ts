@@ -29,29 +29,6 @@ export async function queueHistoryImport(tx: SqlTransaction, ownerId: string) {
   `;
 }
 
-export async function getConnectionStatus(ownerId: string) {
-  const [status] = await sql()`
-    select connections.status as connection, connections.connected_at,
-           import_jobs.status as import_status, import_jobs.pages_imported,
-           import_jobs.updated_at as import_updated_at
-    from oura_private.connections
-    left join oura_private.import_jobs on import_jobs.owner_id = connections.owner_id
-      and import_jobs.collection = 'daily_sleep'
-    where connections.owner_id = ${ownerId}
-  `;
-  return {
-    connection: status?.connection ?? "disconnected",
-    connected_at: status?.connected_at ?? null,
-    history: status?.import_status
-      ? {
-        status: status.import_status,
-        pages_imported: status.pages_imported,
-        updated_at: status.import_updated_at,
-      }
-      : null,
-  };
-}
-
 export async function runHistoryImport(
   ownerId: string,
   pageLimit = 5,
@@ -60,7 +37,6 @@ export async function runHistoryImport(
   for (const collection of collections) {
     await importCollection(ownerId, collection, pageLimit, scheduled);
   }
-  return await getConnectionStatus(ownerId);
 }
 
 async function importCollection(
