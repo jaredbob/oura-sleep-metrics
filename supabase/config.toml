@@ -1,0 +1,4 @@
+project_id = "oura-sleep-metrics"
+
+[functions.oura-oauth]
+verify_jwt = false
