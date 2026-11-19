@@ -1,3 +1,13 @@
+import {
+  configureWebhookFixture,
+  documentFixture,
+  historyFixture,
+  holdHistory,
+  resetWebhookFixture,
+  subscriptionFixture,
+  webhookFixtureStats,
+} from "./oura-webhook-fixture.ts";
+
 type Consent = { challenge: string; uri: string; account: string };
 type Token = { account: string; active: boolean };
 
@@ -27,25 +37,24 @@ function issueTokens(accountId: string): Response {
   });
 }
 
+const sleepDocuments = [
+  {
+    id: "synthetic-sleep-a",
+    day: "2024-03-10",
+    timestamp: "2024-03-11T00:15:00+09:00",
+    score: 82,
+  },
+  {
+    id: "synthetic-sleep-b",
+    day: "2024-03-11",
+    timestamp: "2024-03-10T23:40:00-07:00",
+    score: null,
+  },
+];
+
 const sleepHistory = [
-  {
-    data: [{
-      id: "synthetic-sleep-a",
-      day: "2024-03-10",
-      timestamp: "2024-03-11T00:15:00+09:00",
-      score: 82,
-    }],
-    next_token: "synthetic-second-page",
-  },
-  {
-    data: [{
-      id: "synthetic-sleep-b",
-      day: "2024-03-11",
-      timestamp: "2024-03-10T23:40:00-07:00",
-      score: null,
-    }],
-    next_token: null,
-  },
+  { data: [sleepDocuments[0]], next_token: "synthetic-second-page" },
+  { data: sleepDocuments, next_token: null },
 ];
 
 export async function ouraFixture(req: Request): Promise<Response> {
@@ -61,10 +70,12 @@ export async function ouraFixture(req: Request): Promise<Response> {
     exchanges = 0;
     refreshes = 0;
     historyAttempts = [];
+    resetWebhookFixture();
     return Response.json({});
   }
   if (pathname === "/fixture/configure" && req.method === "POST") {
     const config = await req.json();
+    configureWebhookFixture(config);
     if ("fail_page" in config) failPage = config.fail_page;
     if ("account_id" in config) account = config.account_id;
     if ("reject_refresh" in config) rejectRefresh = config.reject_refresh;
@@ -78,6 +89,7 @@ export async function ouraFixture(req: Request): Promise<Response> {
       exchanges,
       refreshes,
       history_attempts: historyAttempts,
+      ...webhookFixtureStats(),
     });
   }
 
@@ -139,6 +151,9 @@ export async function ouraFixture(req: Request): Promise<Response> {
     return Response.json({ error: "unsupported_grant_type" }, { status: 400 });
   }
 
+  const subscription = await subscriptionFixture(req);
+  if (subscription) return subscription;
+
   const authorization = req.headers.get("authorization");
   const token = accessTokens.get(authorization?.replace(/^Bearer /, "") ?? "");
   if (!token?.active) {
@@ -148,10 +163,14 @@ export async function ouraFixture(req: Request): Promise<Response> {
   if (pathname === "/v2/usercollection/personal_info") {
     return Response.json({ id: token.account });
   }
+  const configuredHistory = historyFixture(url);
   if (pathname === "/v2/usercollection/daily_sleep") {
     const start = searchParams.get("start_date");
     const end = searchParams.get("end_date");
-    if (!start || start > "2024-03-10" || !end || end < "2024-03-11") {
+    if (
+      !configuredHistory &&
+      (!start || start > "2024-03-10" || !end || end < "2024-03-11")
+    ) {
       return Response.json({ data: [], next_token: null });
     }
     const page = searchParams.has("next_token") ? 2 : 1;
@@ -159,9 +178,12 @@ export async function ouraFixture(req: Request): Promise<Response> {
     if (failPage === page) {
       return Response.json({ error: "temporary_failure" }, { status: 503 });
     }
-    return Response.json(sleepHistory[page - 1]);
+    await holdHistory(page);
+    return configuredHistory ?? Response.json(sleepHistory[page - 1]);
   }
-  return new Response("Fixture route missing.", { status: 404 });
+  return configuredHistory ??
+    documentFixture(pathname, sleepDocuments) ??
+    new Response("Fixture route missing.", { status: 404 });
 }
 
 if (import.meta.main) {

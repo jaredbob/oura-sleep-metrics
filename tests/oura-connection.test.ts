@@ -1,37 +1,11 @@
-function required(name: string): string {
-  const value = Deno.env.get(name);
-  if (!value) throw new Error(`Missing ${name}`);
-  return value;
-}
-
-async function command(accessToken: string, ...args: string[]) {
-  const process = new Deno.Command(Deno.execPath(), {
-    args: ["run", "--allow-env", "--allow-net", "scripts/oura.ts", ...args],
-    env: {
-      OURA_FUNCTIONS_URL: required("TEST_OURA_FUNCTIONS_URL"),
-      OURA_OWNER_ACCESS_TOKEN: accessToken,
-    },
-    stdout: "piped",
-    stderr: "piped",
-  });
-  const result = await process.output();
-  const decoder = new TextDecoder();
-  return {
-    ok: result.success,
-    stdout: decoder.decode(result.stdout),
-    stderr: decoder.decode(result.stderr),
-  };
-}
-
-function equal(actual: unknown, expected: unknown) {
-  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
-    throw new Error(
-      `Expected ${JSON.stringify(expected)}, received ${
-        JSON.stringify(actual)
-      }`,
-    );
-  }
-}
+import {
+  authorize,
+  command,
+  equal,
+  fixture,
+  readSql,
+  required,
+} from "./oura-test-support.ts";
 
 Deno.test("Only the Supabase owner can start Oura consent", async () => {
   const other = await command(
@@ -52,46 +26,6 @@ Deno.test("Only the Supabase owner can start Oura consent", async () => {
   equal(consent.searchParams.get("code_challenge_method"), "S256");
   equal(Boolean(consent.searchParams.get("state")), true);
 });
-
-async function fixture(path: string, config?: object) {
-  const response = await fetch(
-    new URL(`/fixture/${path}`, required("TEST_OURA_FIXTURE_URL")),
-    {
-      method: config ? "POST" : "GET",
-      body: config ? JSON.stringify(config) : undefined,
-    },
-  );
-  equal(response.status, 200);
-  return await response.json();
-}
-
-async function authorize(ownerToken: string, action = "connect") {
-  const result = await command(ownerToken, action, "--no-open");
-  equal(result.ok, true);
-  const response = await fetch(JSON.parse(result.stdout).authorization_url, {
-    redirect: "manual",
-  });
-  equal(response.status, 302);
-  const callback = response.headers.get("location");
-  if (!callback) {
-    throw new Error("Expected the fixture to redirect to the OAuth callback.");
-  }
-  return callback;
-}
-
-async function readSql(relation: string, select: string, token?: string) {
-  const headers = new Headers({
-    apikey: required("TEST_OURA_SUPABASE_ANON_KEY"),
-  });
-  if (token) headers.set("authorization", `Bearer ${token}`);
-  const url = new URL(
-    `/rest/v1/${relation}`,
-    required("TEST_OURA_SUPABASE_URL"),
-  );
-  url.search = new URLSearchParams({ select, order: "day" }).toString();
-  const response = await fetch(url, { headers });
-  return { status: response.status, rows: await response.json() };
-}
 
 Deno.test("Consent binds the owner, serializes refresh, and resumes paginated Sleep Scores", async () => {
   const owner = required("TEST_OURA_OWNER_ACCESS_TOKEN");

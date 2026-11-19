@@ -1,7 +1,16 @@
+import { requiredEnv } from "../_shared/db.ts";
+import { ensureSubscriptions } from "../_shared/webhook-subscriptions.ts";
+import { runWebhookWork } from "../_shared/webhook-work.ts";
 import { getConnectionStatus, runHistoryImport } from "../_shared/history.ts";
 import { HttpError, json } from "../_shared/http.ts";
 import { beginConsent, finishConsent } from "../_shared/oura-connection.ts";
 import { requireOwner } from "../_shared/owner.ts";
+
+import {
+  acceptNotification,
+  sameSecret,
+  verifyWebhook,
+} from "../_shared/webhook.ts";
 
 const routePrefix = /^\/(?:functions\/v1\/)?oura-oauth(?=\/|$)/;
 
@@ -9,13 +18,37 @@ export async function handleOuraOAuth(req: Request): Promise<Response> {
   const url = new URL(req.url);
   const route = url.pathname.replace(routePrefix, "");
   try {
+    if (route === "/webhook" && req.method === "GET") {
+      return await verifyWebhook(url.searchParams);
+    }
+    if (route === "/webhook" && req.method === "POST") {
+      const inserted = await acceptNotification(req);
+      if (inserted) {
+        background(() => runWebhookWork(requiredEnv("OURA_OWNER_ID")));
+      }
+      return json({ accepted: true });
+    }
+    if (route === "/work" && req.method === "POST") {
+      const given = req.headers.get("authorization")?.match(/^Bearer (.+)$/i)
+        ?.[1];
+      if (
+        !given || !await sameSecret(given, requiredEnv("OURA_WORKER_SECRET"))
+      ) {
+        throw new HttpError(401, "Oura worker access required.");
+      }
+      const ownerId = requiredEnv("OURA_OWNER_ID");
+      const completed = await Promise.allSettled([
+        runWebhookWork(ownerId),
+        syncInitialHistory(ownerId, 1, true),
+      ]);
+      if (completed.some((result) => result.status === "rejected")) {
+        throw new Error("Scheduled Oura work failed.");
+      }
+      return json({ processed: true });
+    }
     if (route === "/callback" && req.method === "GET") {
       const ownerId = await finishConsent(url.searchParams);
-      const runtime = (globalThis as {
-        EdgeRuntime?: { waitUntil(work: Promise<unknown>): void };
-      })
-        .EdgeRuntime;
-      runtime?.waitUntil(runHistoryImport(ownerId).catch(() => {}));
+      background(() => syncInitialHistory(ownerId));
       return new Response(
         "Oura is connected. Use the owner command to check import status.",
         {
@@ -35,7 +68,7 @@ export async function handleOuraOAuth(req: Request): Promise<Response> {
       return json(await getConnectionStatus(await requireOwner(req)));
     }
     if (route === "/import" && req.method === "POST") {
-      return json(await runHistoryImport(await requireOwner(req)));
+      return json(await syncInitialHistory(await requireOwner(req)));
     }
     return json({ error: "Oura route not found." }, 404);
   } catch (error) {
@@ -55,4 +88,20 @@ export async function handleOuraOAuth(req: Request): Promise<Response> {
     }
     return json({ error: message }, status);
   }
+}
+
+async function syncInitialHistory(
+  ownerId: string,
+  pageLimit = 5,
+  scheduled = false,
+) {
+  await ensureSubscriptions(ownerId);
+  return await runHistoryImport(ownerId, pageLimit, scheduled);
+}
+
+function background(work: () => Promise<unknown>) {
+  const runtime = (globalThis as {
+    EdgeRuntime?: { waitUntil(work: Promise<unknown>): void };
+  }).EdgeRuntime;
+  runtime?.waitUntil(work().catch(() => {}));
 }

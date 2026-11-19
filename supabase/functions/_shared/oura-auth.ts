@@ -62,7 +62,7 @@ export async function getAccessToken(
       select status, access_token, refresh_token, expires_at > clock_timestamp() as usable
       from oura_private.connections
       where owner_id = ${ownerId}
-      for update
+      for no key update
     `;
     if (connection?.status !== "connected") return null;
     if (connection.usable && connection.access_token !== rejectedToken) {
