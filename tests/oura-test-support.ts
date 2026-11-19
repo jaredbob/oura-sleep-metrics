@@ -63,16 +63,18 @@ export async function readSql(
   relation: string,
   select: string,
   token?: string,
+  order = "day",
 ) {
   const headers = new Headers({
     apikey: required("TEST_OURA_SUPABASE_ANON_KEY"),
+    prefer: "timezone=UTC",
   });
   if (token) headers.set("authorization", `Bearer ${token}`);
   const url = new URL(
     `/rest/v1/${relation}`,
     required("TEST_OURA_SUPABASE_URL"),
   );
-  url.search = new URLSearchParams({ select, order: "day" }).toString();
+  url.search = new URLSearchParams({ select, order }).toString();
   const response = await fetch(url, { headers });
   return { status: response.status, rows: await response.json() };
 }
