@@ -192,7 +192,24 @@ Deno.test("An incomplete listing or failed document check preserves HRV until Ou
   equal(failure.retry_reason, "document_check_failed");
   equal((await samples(owner)).rows.length, 2);
 
-  await fixture("configure", { fail_document: null });
+  for (
+    const type of [undefined, null, "synthetic-unrecognized-classification"]
+  ) {
+    await fixture("configure", {
+      fail_document: null,
+      documents: { [session.id]: { id: session.id, day, type } },
+    });
+    const incomplete = await command(owner, "repair", day, day);
+    equal(incomplete.ok, false);
+    equal(
+      JSON.parse(incomplete.stdout).repair.collections.sleep.retry_reason,
+      "document_check_failed",
+    );
+    equal((await samples(owner)).rows.length, 2);
+    equal((await nightly(owner)).rows[0].average_hrv, 54);
+  }
+
+  await fixture("configure", { documents: { [session.id]: null } });
   const recovered = await command(owner, "repair", day, day);
   equal(recovered.ok, true);
   equal(JSON.parse(recovered.stdout).repair.status, "complete");
@@ -379,4 +396,105 @@ Deno.test("A stale webhook fetch cannot resurrect an HRV session deleted by repa
   await staleDelivery;
   equal(await samples(owner), { status: 200, rows: [] });
   equal((await nightly(owner)).rows[0].average_hrv, null);
+});
+
+Deno.test("A webhook that observes a later Sleep Score protects it from a repair page in flight", async () => {
+  const owner = required("TEST_OURA_OWNER_ACCESS_TOKEN");
+  const id = "synthetic-reverse-overlap";
+  const old = { ...sleep, id, score: 70 };
+  await fixture("configure", {
+    documents: { [id]: old },
+    collections: { daily_sleep: onePage(old) },
+    hold_document: id,
+    hold_before_capture: true,
+  });
+  const delivery = notify("update", "daily_sleep", id);
+  try {
+    await waitForFixture("document_held");
+    await fixture("configure", { hold_page: 1 });
+    const repair = command(owner, "repair", day, day);
+    try {
+      await waitForFixture("history_held");
+      await fixture("configure", {
+        documents: { [id]: { ...old, score: 90 } },
+        release_document: true,
+      });
+      await delivery;
+      const readScore = () =>
+        readSql("oura_daily_sleep", "document_id,sleep_score", owner);
+      equal(
+        (await readScore()).rows.find((row: { document_id: string }) =>
+          row.document_id === id
+        )?.sleep_score,
+        90,
+      );
+      await fixture("configure", { release_history: true });
+      equal((await repair).ok, true);
+      equal(
+        (await readScore()).rows.find((row: { document_id: string }) =>
+          row.document_id === id
+        )?.sleep_score,
+        90,
+      );
+    } finally {
+      await fixture("configure", { release_history: true });
+      await repair;
+    }
+  } finally {
+    await fixture("configure", {
+      release_document: true,
+      hold_before_capture: false,
+    });
+    await delivery;
+  }
+});
+
+Deno.test("A webhook rereads the current Sleep Score after a repair finishes during its lookup", async () => {
+  const owner = required("TEST_OURA_OWNER_ACCESS_TOKEN");
+  const id = "synthetic-shadowed-notification";
+  const old = { ...sleep, id, score: 70 };
+  await fixture("configure", {
+    documents: { [id]: old },
+    collections: { daily_sleep: onePage(old) },
+    hold_document: id,
+    hold_before_capture: true,
+  });
+  const delivery = notify("update", "daily_sleep", id);
+  try {
+    await waitForFixture("document_held");
+    equal((await command(owner, "repair", day, day)).ok, true);
+    await fixture("configure", {
+      documents: { [id]: { ...old, score: 90 } },
+    });
+  } finally {
+    await fixture("configure", {
+      release_document: true,
+      hold_before_capture: false,
+    });
+    await delivery;
+  }
+
+  const failedCount = async () => {
+    const { webhooks } = JSON.parse((await command(owner, "status")).stdout);
+    return webhooks.deliveries.collections.find(
+      (row: { collection: string }) => row.collection === "daily_sleep",
+    ).failed;
+  };
+  equal(await failedCount(), 1);
+  for (let attempt = 0; attempt < 20; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    equal((await runWorker()).status, 200);
+    if ((await failedCount()) === 0) break;
+  }
+  equal(await failedCount(), 0);
+  const score = await readSql(
+    "oura_daily_sleep",
+    "document_id,sleep_score",
+    owner,
+  );
+  equal(
+    score.rows.find((row: { document_id: string }) => row.document_id === id)
+      ?.sleep_score,
+    90,
+  );
 });

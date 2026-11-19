@@ -3,7 +3,10 @@ import {
   ensureSubscriptions,
   renewSubscriptions,
 } from "../_shared/webhook-subscriptions.ts";
-import { runWebhookWork } from "../_shared/webhook-work.ts";
+import {
+  pruneCompletedDeliveries,
+  runWebhookWork,
+} from "../_shared/webhook-work.ts";
 import { runHistoryImport } from "../_shared/history.ts";
 import { requestRepair, runRepairWork } from "../_shared/repair.ts";
 import { getConnectionStatus } from "../_shared/sync-status.ts";
@@ -44,6 +47,7 @@ export async function handleOuraOAuth(req: Request): Promise<Response> {
       const ownerId = requiredEnv("OURA_OWNER_ID");
       const completed = await Promise.allSettled([
         runWebhookWork(ownerId),
+        pruneCompletedDeliveries(ownerId),
         runRepairWork(ownerId),
         renewSubscriptions(),
         syncInitialHistory(ownerId, 1, true),
@@ -107,8 +111,8 @@ async function syncInitialHistory(
   pageLimit = 5,
   scheduled = false,
 ) {
-  await ensureSubscriptions(ownerId);
-  await runHistoryImport(ownerId, pageLimit, scheduled);
+  const covered = await ensureSubscriptions(ownerId, scheduled);
+  await runHistoryImport(ownerId, covered, pageLimit, scheduled);
 }
 
 function background(work: () => Promise<unknown>) {

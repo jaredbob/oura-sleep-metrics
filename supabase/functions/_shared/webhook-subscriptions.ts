@@ -1,5 +1,5 @@
 import { collections } from "./collections.ts";
-import { requiredEnv, sql } from "./db.ts";
+import { requiredEnv, sql, type SqlTransaction } from "./db.ts";
 import { queueHistoryImport } from "./history.ts";
 import { ouraApiFetch } from "./oura-api.ts";
 import { eventRanks } from "./webhook.ts";
@@ -15,10 +15,17 @@ type RegisteredSubscription = {
   expires_at: Date;
 };
 
-type LocalSubscriptionStatus = RegisteredSubscription & {
+type RegistrationFailure = "listing_failed" | "registration_failed";
+
+type LocalSubscriptionStatus = {
+  collection: string;
+  event_type: EventType;
+  expires_at: Date | null;
   renewal_retry_at: Date | null;
-  expired: boolean;
-  renewal_due: boolean;
+  registration_retry_at: Date | null;
+  retry_reason: RegistrationFailure | null;
+  expired: boolean | null;
+  renewal_due: boolean | null;
 };
 
 type Subscription = {
@@ -29,45 +36,64 @@ type Subscription = {
   expiration_time: string;
 };
 
+const eventTypes = Object.keys(eventRanks) as EventType[];
 const desiredSubscriptions = collections.flatMap(({ name }) =>
-  (Object.keys(eventRanks) as EventType[]).map((eventType) => ({
+  eventTypes.map((eventType) => ({
     data_type: name,
     event_type: eventType,
   }))
 );
 
-export async function ensureSubscriptions(ownerId: string): Promise<void> {
-  await sql().begin(async (tx) => {
+export async function ensureSubscriptions(
+  ownerId: string,
+  scheduled = false,
+): Promise<string[]> {
+  return await sql().begin(async (tx) => {
     // Oura subscriptions belong to the app. Serialize reconciliation across invocations.
     await tx`select pg_advisory_xact_lock(hashtext('oura_webhook_subscriptions'))`;
     const [connection] = await tx`
       select owner_id from oura_private.connections where owner_id = ${ownerId}
     `;
-    if (!connection) return;
+    if (!connection) return [];
 
     // Covers a collection added after the owner first connected.
     await queueHistoryImport(tx, ownerId);
 
     const callbackUrl = webhookUrl();
-    const active = await tx<{ collection: string; event_type: string }[]>`
-      select collection, event_type from oura_private.webhook_subscriptions
-      where callback_url = ${callbackUrl} and expires_at > now()
-    `;
+    const active = await activeSubscriptions(tx, callbackUrl);
+    const deferred = scheduled
+      ? await tx<{ collection: string; event_type: EventType }[]>`
+        select collection, event_type from oura_private.webhook_registration_failures
+        where callback_url = ${callbackUrl} and retry_at > clock_timestamp()
+      `
+      : [];
     const missing = desiredSubscriptions.filter((desired) =>
-      !active.some((cached) =>
+      !active.concat(deferred).some((cached) =>
         cached.collection === desired.data_type &&
         cached.event_type === desired.event_type
       )
     );
-    if (missing.length === 0) return;
+    if (missing.length === 0) return coveredCollections(active);
 
-    const remote = await subscriptionRequest(subscriptionPath);
-    if (!Array.isArray(remote)) {
-      throw new Error("Invalid Oura subscription list.");
+    let existing: Subscription[];
+    try {
+      const remote = await subscriptionRequest(subscriptionPath);
+      if (!Array.isArray(remote)) {
+        throw new Error("Invalid Oura subscription list.");
+      }
+      existing = remote.map(parseSubscription).filter((entry) =>
+        entry !== null
+      );
+    } catch {
+      await saveRegistrationFailures(
+        tx,
+        callbackUrl,
+        missing,
+        "listing_failed",
+      );
+      return coveredCollections(active);
     }
-    const existing = remote.map(parseSubscription).filter((entry) =>
-      entry !== null
-    );
+
     const reconciled = await Promise.allSettled(
       missing.map(async (desired) => {
         const known = existing.find((item) =>
@@ -100,10 +126,16 @@ export async function ensureSubscriptions(ownerId: string): Promise<void> {
       }),
     );
 
-    const subscriptions = reconciled.map((result) => {
-      if (result.status === "rejected") throw result.reason;
-      return result.value;
-    });
+    await saveRegistrationFailures(
+      tx,
+      callbackUrl,
+      missing.filter((_, index) => reconciled[index].status === "rejected"),
+      "registration_failed",
+    );
+    const subscriptions = reconciled.flatMap((result) =>
+      result.status === "fulfilled" ? [result.value] : []
+    );
+    if (subscriptions.length === 0) return coveredCollections(active);
 
     await tx`
       insert into oura_private.webhook_subscriptions
@@ -127,19 +159,73 @@ export async function ensureSubscriptions(ownerId: string): Promise<void> {
       set provider_id = excluded.provider_id, callback_url = excluded.callback_url, expires_at = excluded.expires_at,
           renewal_attempts = 0, renewal_retry_at = null
     `;
-
-    // Restart any previously started history once the missing coverage is in place.
     await tx`
-      update oura_private.import_jobs
-      set revision = gen_random_uuid(), next_token = null, status = 'pending', pages_imported = 0,
-          end_day = greatest(end_day, current_date + 2), updated_at = now(), available_at = now()
-      where owner_id = ${ownerId} and collection = any(${
-      tx.array(
-        [...new Set(subscriptions.map(({ data_type }) => data_type))],
-      )
-    }::text[])
+      delete from oura_private.webhook_registration_failures failures
+      using oura_private.webhook_subscriptions registered
+      where failures.callback_url = ${callbackUrl}
+        and failures.callback_url = registered.callback_url
+        and failures.collection = registered.collection
+        and failures.event_type = registered.event_type
+        and registered.expires_at > clock_timestamp()
     `;
+
+    const covered = coveredCollections(
+      await activeSubscriptions(tx, callbackUrl),
+    );
+    const restored = covered.filter((collection) =>
+      subscriptions.some((entry) => entry.data_type === collection)
+    );
+
+    // Rewind only the history whose coverage was restored after a gap.
+    if (restored.length > 0) {
+      await tx`
+        update oura_private.import_jobs
+        set revision = gen_random_uuid(), next_token = null, page_tokens = '{}',
+            status = 'pending', pages_imported = 0,
+            end_day = greatest(end_day, current_date + 2), updated_at = now(), available_at = now()
+        where owner_id = ${ownerId} and collection = any(${
+        tx.array(restored)
+      }::text[])
+      `;
+    }
+    return covered;
   });
+}
+
+function activeSubscriptions(tx: SqlTransaction, callbackUrl: string) {
+  return tx<{ collection: string; event_type: EventType }[]>`
+    select collection, event_type from oura_private.webhook_subscriptions
+    where callback_url = ${callbackUrl} and expires_at > clock_timestamp()
+  `;
+}
+
+function coveredCollections(active: readonly { collection: string }[]) {
+  return collections.map(({ name }) => name).filter((name) =>
+    active.filter(({ collection }) => collection === name).length ===
+      eventTypes.length
+  );
+}
+
+async function saveRegistrationFailures(
+  tx: SqlTransaction,
+  callbackUrl: string,
+  missing: typeof desiredSubscriptions,
+  reason: RegistrationFailure,
+) {
+  if (missing.length === 0) return;
+  await tx`
+    insert into oura_private.webhook_registration_failures
+      (collection, event_type, callback_url, retry_reason, retry_at)
+    select collection, event_type, ${callbackUrl}, ${reason},
+           clock_timestamp() + interval '30 seconds'
+    from unnest(
+      ${tx.array(missing.map(({ data_type }) => data_type))}::text[],
+      ${tx.array(missing.map(({ event_type }) => event_type))}::text[]
+    ) as missing(collection, event_type)
+    on conflict (collection, event_type) do update
+    set callback_url = excluded.callback_url, retry_reason = excluded.retry_reason,
+        retry_at = excluded.retry_at
+  `;
 }
 
 export async function renewSubscriptions(): Promise<void> {
@@ -200,12 +286,15 @@ export async function renewSubscriptions(): Promise<void> {
 }
 
 export async function getSubscriptionStatus() {
+  const callbackUrl = webhookUrl();
   const registered = await sql()<LocalSubscriptionStatus[]>`
-    select collection, event_type, expires_at, renewal_retry_at,
+    select collection, event_type, expires_at, renewal_retry_at, retry_reason,
+           retry_at as registration_retry_at,
            expires_at <= now() as expired,
            expires_at <= now() + make_interval(secs => ${renewalLeadSeconds}) as renewal_due
-    from oura_private.webhook_subscriptions
-    where callback_url = ${webhookUrl()}
+    from (select * from oura_private.webhook_subscriptions where callback_url = ${callbackUrl}) subscriptions
+    full join (select * from oura_private.webhook_registration_failures where callback_url = ${callbackUrl}) failures
+      using (collection, event_type)
   `;
   return desiredSubscriptions.map(({ data_type, event_type }) => {
     const cached = registered.find((row) =>
@@ -213,7 +302,8 @@ export async function getSubscriptionStatus() {
     );
     let status = "pending";
     if (cached) {
-      if (cached.expired) status = "expired";
+      if (cached.registration_retry_at) status = "retryable";
+      else if (cached.expired) status = "expired";
       else if (cached.renewal_retry_at) status = "retryable";
       else if (cached.renewal_due) status = "renewal_pending";
       else status = "active";
@@ -223,7 +313,10 @@ export async function getSubscriptionStatus() {
       event_type,
       status,
       expires_at: cached?.expires_at ?? null,
-      retry_at: status === "retryable" ? cached?.renewal_retry_at : null,
+      retry_at: status === "retryable"
+        ? cached?.registration_retry_at ?? cached?.renewal_retry_at ?? null
+        : null,
+      retry_reason: cached?.retry_reason ?? null,
     };
   });
 }

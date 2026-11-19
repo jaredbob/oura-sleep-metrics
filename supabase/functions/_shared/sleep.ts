@@ -1,4 +1,4 @@
-import type { Collection, OuraRecord } from "./collection.ts";
+import { type Collection, isDay, type OuraRecord } from "./collection.ts";
 
 type HrvSeries = {
   started_at: string;
@@ -16,7 +16,6 @@ type SleepSession = {
 
 type SleepRecord = OuraRecord & { session: SleepSession | null };
 
-const datePattern = /^\d{4}-\d{2}-\d{2}$/;
 const timestampPattern = /^\d{4}-\d{2}-\d{2}T[\d:.]+(?:Z|[+-]\d{2}:\d{2})$/;
 const otherSleepTypes = ["sleep", "late_nap", "rest", "deleted"];
 
@@ -26,6 +25,7 @@ export const sleep: Collection<SleepRecord> = {
   fields:
     "id,day,type,bedtime_start,bedtime_end,total_sleep_duration,average_hrv,hrv",
   parse,
+  parseListed: (value) => parse(value, true),
   shouldStore: ({ session }) => session !== null,
   async upsert(tx, ownerId, records) {
     // Clear corrected samples and remove any session Oura has reclassified.
@@ -82,7 +82,9 @@ export const sleep: Collection<SleepRecord> = {
   },
 };
 
-function parse(value: unknown): SleepRecord {
+function parse(value: unknown): SleepRecord;
+function parse(value: unknown, listed: true): SleepRecord | null;
+function parse(value: unknown, listed = false): SleepRecord | null {
   if (typeof value !== "object" || value === null) {
     throw new Error("Invalid Oura Sleep Session document.");
   }
@@ -97,18 +99,18 @@ function parse(value: unknown): SleepRecord {
     hrv,
   } = value as Record<string, unknown>;
   if (
-    typeof id !== "string" || !id || typeof day !== "string" ||
-    !datePattern.test(day)
+    typeof id !== "string" || !id || !isDay(day)
   ) {
     throw new Error("Invalid Oura Sleep Session document.");
   }
-  if (
-    type == null || (typeof type === "string" && otherSleepTypes.includes(type))
-  ) {
+  if (typeof type === "string" && otherSleepTypes.includes(type)) {
     return { document_id: id, day, session: null };
   }
+  if (type !== "long_sleep") {
+    if (listed) return null;
+    throw new Error("Unclassified Oura Sleep Session document.");
+  }
   if (
-    type !== "long_sleep" ||
     !isTimestamp(bedtime_start) || !isTimestamp(bedtime_end) ||
     (total_sleep_duration != null &&
       (typeof total_sleep_duration !== "number" ||

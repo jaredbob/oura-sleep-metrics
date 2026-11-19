@@ -1,10 +1,18 @@
 import type { Collection, OuraRecord } from "./collection.ts";
 import { sql, type SqlTransaction } from "./db.ts";
 
-export async function nextReadRevision(): Promise<string> {
+export async function nextReadRevision(ownerId: string): Promise<string> {
+  // Allocate after the connection lock so new reads start on the far side
+  // of any authoritative webhook write already committing for this owner.
   const [result] = await sql()<{ revision: string }[]>`
+    with owner_lock as materialized (
+      select owner_id from oura_private.connections
+      where owner_id = ${ownerId} for share
+    )
     select nextval('oura_private.document_read_revision')::text as revision
+    from owner_lock
   `;
+  if (!result) throw new Error("Oura connection is missing.");
   return result.revision;
 }
 

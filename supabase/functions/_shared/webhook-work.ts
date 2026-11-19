@@ -5,6 +5,7 @@ import {
 } from "./collection.ts";
 import { collections } from "./collections.ts";
 import { sql, type SqlTransaction } from "./db.ts";
+import { nextReadRevision } from "./document-versions.ts";
 import { ouraUserFetch, ReconnectRequired } from "./oura-auth.ts";
 import { eventRanks } from "./webhook.ts";
 
@@ -16,10 +17,10 @@ type Delivery = {
   event_rank: number;
   generation: string;
   lease: string;
-  read_revision: string;
 };
 
 class DocumentUnavailable extends Error {}
+class DocumentChanged extends Error {}
 
 export async function runWebhookWork(ownerId: string): Promise<void> {
   // Bound the number of outstanding provider requests per Edge invocation.
@@ -34,17 +35,20 @@ export async function runWebhookWork(ownerId: string): Promise<void> {
       );
       if (!collection) throw new Error("Unknown webhook collection.");
 
-      const version = await documentVersion(sql(), ownerId, delivery);
+      const revision = await nextReadRevision(ownerId);
+      const version = await documentVersion(sql(), ownerId, delivery, revision);
       const deleting = delivery.event_rank === eventRanks.delete;
       const record = !version?.stale && !deleting
         ? await fetchDocument(ownerId, collection, delivery.document_id)
         : null;
-      await completeDelivery(ownerId, collection, delivery, record);
+      await completeDelivery(ownerId, collection, delivery, revision, record);
     } catch (error) {
       const retryReason = error instanceof ReconnectRequired
         ? "reconnect_required"
         : error instanceof DocumentUnavailable
         ? "oura_document_unavailable"
+        : error instanceof DocumentChanged
+        ? "document_changed"
         : "processing_failed";
       await sql()`
         update oura_private.webhook_deliveries
@@ -54,6 +58,20 @@ export async function runWebhookWork(ownerId: string): Promise<void> {
       `;
     }
   }
+}
+
+export async function pruneCompletedDeliveries(ownerId: string): Promise<void> {
+  await sql()`
+    with old_deliveries as (
+      select id from oura_private.webhook_deliveries
+      where owner_id = ${ownerId} and processed_at < now() - interval '7 days'
+      order by processed_at, id
+      limit 1000
+      for update skip locked
+    )
+    delete from oura_private.webhook_deliveries deliveries
+    using old_deliveries where deliveries.id = old_deliveries.id
+  `;
 }
 
 async function claimDelivery(ownerId: string): Promise<Delivery | undefined> {
@@ -74,8 +92,7 @@ async function claimDelivery(ownerId: string): Promise<Delivery | undefined> {
     from pending
     where deliveries.id = pending.id
     returning deliveries.id::text, deliveries.collection, deliveries.document_id, deliveries.event_time::text,
-              deliveries.event_rank, deliveries.lease, pending.generation,
-              nextval('oura_private.document_read_revision')::text as read_revision
+              deliveries.event_rank, deliveries.lease, pending.generation
   `;
   return delivery;
 }
@@ -84,13 +101,12 @@ function documentVersion(
   tx: SqlTransaction | ReturnType<typeof sql>,
   ownerId: string,
   delivery: Delivery,
+  revision: string,
 ) {
-  return tx<
-    { deleted: boolean; stale: boolean | null; write_allowed: boolean }[]
-  >`
-    select deleted,
+  return tx<{ stale: boolean | null; write_allowed: boolean }[]>`
+    select
            (event_time, event_rank) >= (${delivery.event_time}::timestamptz, ${delivery.event_rank}::smallint) as stale,
-           (read_revision < ${delivery.read_revision}::bigint) as write_allowed
+           (read_revision < ${revision}::bigint) as write_allowed
     from oura_private.document_versions
     where owner_id = ${ownerId} and collection = ${delivery.collection}
       and document_id = ${delivery.document_id}
@@ -121,6 +137,7 @@ async function completeDelivery(
   ownerId: string,
   collection: Collection,
   delivery: Delivery,
+  revision: string,
   record: OuraRecord | null,
 ) {
   await sql().begin(async (tx) => {
@@ -145,28 +162,27 @@ async function completeDelivery(
     `;
     if (marked.count === 0) return;
 
-    const version = await documentVersion(tx, ownerId, delivery);
+    const version = await documentVersion(tx, ownerId, delivery, revision);
     if (version?.stale) return;
-
-    if (!deleted && version?.deleted && !version.write_allowed) {
-      // A newer deletion was applied while this document was being fetched.
-      throw new Error("Oura document changed during delivery processing.");
-    }
 
     if (deleted) {
       await collection.remove(tx, ownerId, delivery.document_id);
-    } else if (record && (!version || version.write_allowed)) {
+    } else {
+      // Leave the delivery retryable so it reads the current source again.
+      if (version && !version.write_allowed) throw new DocumentChanged();
+      if (!record) throw new DocumentUnavailable();
       await collection.upsert(tx, ownerId, [record]);
     }
+    // Fence off every snapshot read started before this authoritative write.
     await tx`
       insert into oura_private.document_versions
         (owner_id, collection, document_id, read_revision, event_time, event_rank, deleted)
       values
-        (${ownerId}, ${collection.name}, ${delivery.document_id}, ${delivery.read_revision}::bigint,
+        (${ownerId}, ${collection.name}, ${delivery.document_id}, nextval('oura_private.document_read_revision'),
          ${delivery.event_time}::timestamptz, ${delivery.event_rank}, ${deleted})
       on conflict (owner_id, collection, document_id) do update
       set event_time = excluded.event_time, event_rank = excluded.event_rank, deleted = excluded.deleted,
-          read_revision = greatest(document_versions.read_revision, excluded.read_revision)
+          read_revision = excluded.read_revision
     `;
   });
 }

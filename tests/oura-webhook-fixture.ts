@@ -16,12 +16,15 @@ const subscriptionPath = "/v2/webhook/subscription";
 const subscriptions: Subscription[] = [];
 let renewals: string[] = [];
 let renewalFailures: string[] = [];
+let registrationFailures: string[] = [];
+let failSubscriptionList = false;
 let subscriptionLifetimes: Record<string, number> = {};
 let documentAttempts: string[] = [];
 let documents = new Map<string, SyntheticDocument | null>();
 const collections = new Map<string, HistoryPage[]>();
 let failDocument: string | null = null;
 let heldDocument: string | null = null;
+let holdBeforeCapture = false;
 let releaseDocument: (() => void) | undefined;
 let heldPage: number | null = null;
 let releaseHistory: (() => void) | undefined;
@@ -36,7 +39,9 @@ export async function subscriptionFixture(
     req.headers.get("x-client-secret") !== Deno.env.get("OURA_CLIENT_SECRET")
   ) return Response.json({ error: "invalid_client" }, { status: 401 });
   if (pathname === subscriptionPath && req.method === "GET") {
-    return Response.json(subscriptions);
+    return failSubscriptionList
+      ? Response.json({ error: "temporary_failure" }, { status: 503 })
+      : Response.json(subscriptions);
   }
   if (
     pathname.startsWith(subscriptionPath + "/renew/") && req.method === "PUT"
@@ -61,6 +66,9 @@ export async function subscriptionFixture(
   }
   if (pathname === subscriptionPath && req.method === "POST") {
     const body = await req.json();
+    if (registrationFailures.includes(`${body.data_type}/${body.event_type}`)) {
+      return Response.json({ error: "verification_failed" }, { status: 422 });
+    }
     const url = new URL(body.callback_url);
     const challenge = "synthetic-subscription-challenge";
     url.searchParams.set("challenge", challenge);
@@ -107,6 +115,8 @@ export function resetWebhookFixture() {
   subscriptions.length = 0;
   renewals = [];
   renewalFailures = [];
+  registrationFailures = [];
+  failSubscriptionList = false;
   subscriptionLifetimes = {};
   documentAttempts = [];
   documents.clear();
@@ -114,6 +124,7 @@ export function resetWebhookFixture() {
   failDocument = null;
   heldPage = null;
   heldDocument = null;
+  holdBeforeCapture = false;
   releaseHistory?.();
   releaseDocument?.();
 }
@@ -127,6 +138,12 @@ export function configureWebhookFixture(config: Record<string, unknown>) {
   }
   if ("renewal_failures" in config) {
     renewalFailures = config.renewal_failures as string[];
+  }
+  if ("registration_failures" in config) {
+    registrationFailures = config.registration_failures as string[];
+  }
+  if ("fail_subscription_list" in config) {
+    failSubscriptionList = config.fail_subscription_list === true;
   }
   if ("documents" in config) {
     documents = new Map(
@@ -151,6 +168,9 @@ export function configureWebhookFixture(config: Record<string, unknown>) {
   if (config.release_history) releaseHistory?.();
   if ("hold_document" in config) {
     heldDocument = config.hold_document as string | null;
+  }
+  if ("hold_before_capture" in config) {
+    holdBeforeCapture = config.hold_before_capture === true;
   }
   if (config.release_document) releaseDocument?.();
 }
@@ -213,6 +233,10 @@ export async function documentFixture(
   if (failDocument === id || failDocument === key) {
     return Response.json({ error: "temporary_failure" }, { status: 503 });
   }
+  const held = heldDocument === id;
+  if (held) heldDocument = null;
+  const before = holdBeforeCapture;
+  if (held && before) await holdDocument();
   const baseline = collections.get(collection)?.flatMap((page) => page.data) ??
     (collection === "daily_sleep" ? sleepBaseline : []);
   const fixtureKey = documents.has(key) ? key : id;
@@ -222,12 +246,13 @@ export async function documentFixture(
   const response = document == null
     ? Response.json({ error: "not_found" }, { status: 404 })
     : Response.json(document);
-  if (heldDocument === id) {
-    heldDocument = null;
-    await new Promise<void>((resolve) => {
-      releaseDocument = resolve;
-    });
-    releaseDocument = undefined;
-  }
+  if (held && !before) await holdDocument();
   return response;
+}
+
+async function holdDocument() {
+  await new Promise<void>((resolve) => {
+    releaseDocument = resolve;
+  });
+  releaseDocument = undefined;
 }

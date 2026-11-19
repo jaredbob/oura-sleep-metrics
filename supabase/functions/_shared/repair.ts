@@ -1,8 +1,14 @@
 import {
   type Collection,
   collectionPath,
+  isDay,
   type OuraRecord,
 } from "./collection.ts";
+import {
+  InvalidCursor,
+  type PageCursor,
+  readCollectionPage,
+} from "./collection-page.ts";
 import { collections } from "./collections.ts";
 import { sql, type SqlTransaction } from "./db.ts";
 import {
@@ -13,7 +19,7 @@ import {
 import { HttpError } from "./http.ts";
 import { ouraUserFetch, ReconnectRequired } from "./oura-auth.ts";
 
-type RepairJob = {
+type RepairJob = PageCursor & {
   run_id: string;
   collection: string;
   generation: string;
@@ -22,8 +28,6 @@ type RepairJob = {
   end_day: string;
   provider_end_day: string;
   document_id: string | null;
-  next_token: string | null;
-  page_tokens: string[];
 };
 
 type JobStatus = {
@@ -37,8 +41,6 @@ type JobStatus = {
   retry_reason: string | null;
   updated_at: Date;
 };
-
-class InvalidCursor extends Error {}
 
 export async function requestRepair(ownerId: string, req: Request) {
   const range = await req.json().catch(() => null);
@@ -151,7 +153,7 @@ export async function runRepairWork(ownerId: string, runId?: string) {
     if (!job) break;
     const collection = collections.find(({ name }) => name === job.collection)!;
     try {
-      const revision = await nextReadRevision();
+      const revision = await nextReadRevision(ownerId);
       if (job.document_id !== null) {
         await checkDocument(
           ownerId,
@@ -214,41 +216,16 @@ async function repairPage(
   job: RepairJob,
   revision: string,
 ) {
-  const params = new URLSearchParams({
-    start_date: job.start_day,
-    end_date: job.provider_end_day,
-    fields: collection.fields,
-  });
-  if (job.next_token) params.set("next_token", job.next_token);
-  const response = await ouraUserFetch(
+  const { records: page, nextToken, pageTokens } = await readCollectionPage(
     ownerId,
-    `${collectionPath(collection)}?${params}`,
+    collection,
+    job.start_day,
+    job.provider_end_day,
+    job,
   );
-  if (!response.ok) {
-    await response.body?.cancel();
-    if (
-      job.next_token && (response.status === 400 || response.status === 422)
-    ) {
-      throw new InvalidCursor();
-    }
-    throw new Error("Oura range request failed.");
-  }
-  const page = await response.json();
-  const token = page?.next_token;
-  if (
-    !Array.isArray(page?.data) ||
-    (token !== null && (typeof token !== "string" || !token))
-  ) {
-    throw new Error("Invalid Oura repair page.");
-  }
-  if (token !== null && job.page_tokens.includes(token)) {
-    throw new InvalidCursor();
-  }
 
   const records = new Map<string, OuraRecord>();
-  for (const document of page.data) {
-    const record = collection.parse(document);
-    if (!isDay(record.day)) throw new Error("Invalid Oura document day.");
+  for (const record of page) {
     if (record.day < job.start_day || record.day > job.end_day) continue;
     // A non-Main Sleep Session may remove a local record. Confirm it directly
     // after finishing the listing, alongside any other omitted local IDs.
@@ -266,17 +243,15 @@ async function repairPage(
         on conflict do nothing
       `;
     }
-    if (token === null) {
+    if (nextToken === null) {
       await queueMissingDocuments(tx, ownerId, collection, job);
     }
     await tx`
       update oura_private.repair_jobs
-      set next_token = ${token}, listed = ${token === null},
-          page_tokens = ${
-      tx.array(token === null ? [] : [...job.page_tokens, token])
-    }::text[],
+      set next_token = ${nextToken}, listed = ${nextToken === null},
+          page_tokens = ${tx.array(pageTokens)}::text[],
           pages_imported = pages_imported + 1,
-          status = case when ${token === null} and not exists (
+          status = case when ${nextToken === null} and not exists (
             select 1 from oura_private.repair_documents documents
             where documents.run_id = repair_jobs.run_id and documents.collection = repair_jobs.collection
               and documents.needs_check
@@ -409,16 +384,4 @@ async function failJob(job: RepairJob, error: unknown) {
       `;
     }
   });
-}
-
-function isDay(value: unknown): value is string {
-  if (
-    typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value) ||
-    value.startsWith("0000")
-  ) {
-    return false;
-  }
-  const date = new Date(value);
-  return Number.isFinite(date.getTime()) &&
-    date.toISOString().slice(0, 10) === value;
 }

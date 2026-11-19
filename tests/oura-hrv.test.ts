@@ -73,7 +73,11 @@ Deno.test("History imports Main Sleep Session HRV by Oura day and timestamped sa
     collections: {
       sleep: [
         {
-          data: [mainSession, nap],
+          data: [mainSession, nap, {
+            id: mainSession.id,
+            day: sleepDay,
+            type: null,
+          }],
           next_token: "synthetic-session-page-two",
         },
         { data: [alternate, missing], next_token: null },
@@ -254,6 +258,19 @@ Deno.test("Signed Sleep Session deliveries create, replace, and delete the corre
 
 Deno.test("A Sleep Session reclassified as a nap stops contributing HRV", async () => {
   const owner = required("TEST_OURA_OWNER_ACCESS_TOKEN");
+  await fixture("configure", {
+    documents: { [mainSession.id]: { id: mainSession.id, day: sleepDay } },
+  });
+  await notify("update", mainSession.id, "2024-03-22T01:50:00Z");
+  equal(
+    (await readSessionSamples(owner, mainSession.id)).map(({ hrv }) => hrv),
+    [
+      57.5,
+      null,
+      0,
+    ],
+  );
+
   await fixture("configure", {
     documents: { [mainSession.id]: { ...mainSession, type: "late_nap" } },
   });

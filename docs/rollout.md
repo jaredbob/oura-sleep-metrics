@@ -54,10 +54,50 @@ Review and run
 [schedule_oura_worker.sql](../supabase/operations/schedule_oura_worker.sql) in
 the SQL Editor. Confirm the `oura-webhook-worker` job runs every minute. It
 processes pending deliveries, renews subscriptions, and continues initial
-history and date-range repair.
+history and date-range repair. It prunes completed delivery diagnostics seven
+days after processing. Pending and retryable deliveries stay queued, and
+document versions and deletion markers remain available to order subsequent
+updates.
 [Supabase scheduling documentation](https://supabase.com/docs/guides/functions/schedule-functions)
 
-## 4. Connect and verify as the owner
+## 4. Verify retention and deletion before live consent
+
+Rehearse deletion with synthetic records in a disposable environment and keep
+the evidence and any project details private. Follow the timing in the
+[privacy policy](../PRIVACY.md).
+
+1. Inventory recoverable copies of Oura data and credentials. Check the
+   project's daily backups or point-in-time recovery, manual exports, restore
+   and staging copies, and available log retention and drains. Review which
+   callback parameters, headers, and SQL statements appear in logs. Keep
+   readings, Oura identifiers, and credentials out of log messages and exports.
+   See
+   [Supabase database backups](https://supabase.com/docs/guides/platform/backups)
+   and [Supabase logs](https://supabase.com/docs/guides/observability/logs).
+2. For a full deletion, revoke sharing in the Oura app, remove this
+   integration's webhook subscriptions from Oura, and stop the
+   `oura-webhook-worker` schedule and `oura-oauth` endpoint. Confirm outstanding
+   function requests have finished before deleting database rows.
+3. In a transaction, delete the configured owner's row from
+   `oura_private.connections` and any authorization state for that owner from
+   `oura_private.oauth_states`. The connection deletion cascades to the readings
+   and HRV samples, document versions, queued webhook deliveries, history jobs,
+   and date-range repair. Remove the integration's
+   `oura_private.webhook_subscriptions` and
+   `oura_private.webhook_registration_failures` rows for its callback URL.
+   Remove its Oura Edge Function secrets and the two worker secrets in Vault.
+   Scope the procedure to these Oura integration objects.
+4. Verify the owner's Oura queries return no rows and the private Oura tables
+   contain no remaining data for the deleted connection or registrations for the
+   removed callback. Check for Oura-derived exports and remove those copies. In
+   an isolated restore rehearsal, verify Oura records and credentials can be
+   excluded or removed before the restored data becomes available. Confirm the
+   deletion procedure covers all retained copies within the policy's 72-hour
+   window, including any provider-managed recovery points or logs that can still
+   expose recoverable Oura data. Proceed to live consent only after the project
+   can meet that requirement.
+
+## 5. Connect and verify as the owner
 
 Set `OURA_FUNCTIONS_URL` to `https://<project-ref>.supabase.co/functions/v1`.
 Supply a current access token from the configured owner's Supabase Auth session
@@ -71,10 +111,13 @@ deno run --allow-env --allow-net scripts/oura.ts status
 
 Open the returned authorization URL privately and finish Oura consent before
 running `status`. Status reports the connection, history progress, webhook
-coverage and queued deliveries, and the latest requested range repair. Use
-`reconnect --no-open` with the same Oura account if access needs to be restored.
-The worker advances initial import in batches. `scripts/oura.ts import` advances
-it on demand with the same Deno permissions.
+coverage and queued deliveries, and the latest requested range repair. History
+advances for each collection once its create, update, and delete subscriptions
+are active. Status shows which subscription registrations are retryable while
+healthy collections continue. Use `reconnect --no-open` with the same Oura
+account if access needs to be restored. The worker advances initial import in
+batches. `scripts/oura.ts import` advances it on demand with the same Deno
+permissions.
 
 Query `public.oura_nightly` using the authenticated owner identity. For a manual
 check in the SQL Editor, run the query in a transaction under that role.

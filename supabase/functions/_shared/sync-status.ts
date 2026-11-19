@@ -31,7 +31,7 @@ export async function getConnectionStatus(ownerId: string) {
     };
   }
 
-  const [imports, subscriptions, deliveries, repair] = await Promise.all([
+  const [jobs, subscriptions, deliveries, repair] = await Promise.all([
     sql()<ImportJob[]>`
       select expected.collection, coalesce(jobs.status, 'pending') as status,
              coalesce(jobs.pages_imported, 0) as pages_imported, jobs.updated_at
@@ -58,6 +58,15 @@ export async function getConnectionStatus(ownerId: string) {
     repairStatus(ownerId),
   ]);
 
+  const registrationFailures = new Set(
+    subscriptions.filter(({ retry_reason }) => retry_reason !== null)
+      .map(({ collection }) => collection),
+  );
+  const imports: ImportJob[] = jobs.map((job) =>
+    registrationFailures.has(job.collection)
+      ? { ...job, status: "retryable" }
+      : job
+  );
   const completed = imports.filter((job) => job.status === "complete").length;
   const retryable = imports.filter((job) => job.status === "retryable").length;
   const pending = imports.length - completed - retryable;

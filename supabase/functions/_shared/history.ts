@@ -1,19 +1,19 @@
+import type { Collection } from "./collection.ts";
 import {
-  type Collection,
-  collectionPath,
-  type OuraRecord,
-} from "./collection.ts";
+  InvalidCursor,
+  type PageCursor,
+  readCollectionPage,
+} from "./collection-page.ts";
 import { collections } from "./collections.ts";
 import { sql, type SqlTransaction } from "./db.ts";
 import { applySnapshots, nextReadRevision } from "./document-versions.ts";
-import { ouraUserFetch, ReconnectRequired } from "./oura-auth.ts";
+import { ReconnectRequired } from "./oura-auth.ts";
 
-type Job = {
+type Job = PageCursor & {
   revision: string;
   generation: string;
   start_day: string;
   end_day: string;
-  next_token: string | null;
 };
 
 export async function queueHistoryImport(tx: SqlTransaction, ownerId: string) {
@@ -31,11 +31,14 @@ export async function queueHistoryImport(tx: SqlTransaction, ownerId: string) {
 
 export async function runHistoryImport(
   ownerId: string,
+  coveredCollections: readonly string[],
   pageLimit = 5,
   scheduled = false,
 ) {
   for (const collection of collections) {
-    await importCollection(ownerId, collection, pageLimit, scheduled);
+    if (coveredCollections.includes(collection.name)) {
+      await importCollection(ownerId, collection, pageLimit, scheduled);
+    }
   }
 }
 
@@ -47,7 +50,8 @@ async function importCollection(
 ) {
   for (let page = 0; page < pageLimit; page++) {
     const [job] = await sql()<Job[]>`
-      select jobs.revision, connections.generation, jobs.start_day::text, jobs.end_day::text, jobs.next_token
+      select jobs.revision, connections.generation, jobs.start_day::text, jobs.end_day::text,
+             jobs.next_token, jobs.page_tokens
       from oura_private.import_jobs jobs
       join oura_private.connections using (owner_id)
       where owner_id = ${ownerId} and collection = ${collection.name}
@@ -57,33 +61,14 @@ async function importCollection(
     if (!job) break;
 
     try {
-      const params = new URLSearchParams({
-        start_date: job.start_day,
-        end_date: job.end_day,
-        fields: collection.fields,
-      });
-      if (job.next_token) params.set("next_token", job.next_token);
-
-      const readRevision = await nextReadRevision();
-      const response = await ouraUserFetch(
+      const readRevision = await nextReadRevision(ownerId);
+      const { records, nextToken, pageTokens } = await readCollectionPage(
         ownerId,
-        `${collectionPath(collection)}?${params}`,
+        collection,
+        job.start_day,
+        job.end_day,
+        job,
       );
-      if (!response.ok) throw new Error("Oura history request failed.");
-      const result = await response.json();
-      if (
-        !Array.isArray(result?.data) ||
-        (result.next_token !== null &&
-          (typeof result.next_token !== "string" || !result.next_token ||
-            result.next_token === job.next_token))
-      ) {
-        throw new Error("Invalid Oura history page.");
-      }
-      const records = new Map<string, OuraRecord>();
-      for (const document of result.data) {
-        const record = collection.parse(document);
-        records.set(record.document_id, record);
-      }
 
       await sql().begin(async (tx) => {
         const [connection] = await tx`
@@ -97,23 +82,39 @@ async function importCollection(
 
         const updated = await tx`
           update oura_private.import_jobs
-          set revision = gen_random_uuid(), next_token = ${result.next_token},
+          set revision = gen_random_uuid(), next_token = ${nextToken},
+              page_tokens = ${tx.array(pageTokens)}::text[],
               status = ${
-          result.next_token ? "pending" : "complete"
+          nextToken ? "pending" : "complete"
         }, available_at = now(),
               pages_imported = pages_imported + 1, updated_at = now()
           where owner_id = ${ownerId} and collection = ${collection.name} and revision = ${job.revision}
         `;
         if (updated.count === 0) return;
 
-        await applySnapshots(tx, ownerId, collection, readRevision, records);
+        await applySnapshots(
+          tx,
+          ownerId,
+          collection,
+          readRevision,
+          new Map(records.map((record) => [record.document_id, record])),
+        );
       });
     } catch (error) {
       if (error instanceof ReconnectRequired) break;
+      const reset = error instanceof InvalidCursor;
       await sql()`
         update oura_private.import_jobs
-        set status = 'retryable', updated_at = now(), available_at = now() + interval '1 minute'
+        set status = 'retryable', updated_at = now(), available_at = now() + interval '1 minute',
+            revision = case when ${reset} then gen_random_uuid() else revision end,
+            next_token = case when ${reset} then null else next_token end,
+            page_tokens = case when ${reset} then '{}' else page_tokens end,
+            pages_imported = case when ${reset} then 0 else pages_imported end
         where owner_id = ${ownerId} and collection = ${collection.name} and revision = ${job.revision}
+          and exists (
+            select 1 from oura_private.connections
+            where owner_id = ${ownerId} and generation = ${job.generation} and status = 'connected'
+          )
       `;
       break;
     }
