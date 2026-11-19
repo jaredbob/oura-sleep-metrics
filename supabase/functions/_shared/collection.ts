@@ -8,6 +8,8 @@ export type OuraRecord = {
 export interface Collection<Record extends OuraRecord = OuraRecord> {
   name: string;
   fields: string;
+  sourceTable: string;
+  shouldStore?(record: Record): boolean;
   parse(value: unknown): Record;
   upsert(
     tx: SqlTransaction,

@@ -21,6 +21,8 @@ let documentAttempts: string[] = [];
 let documents = new Map<string, SyntheticDocument | null>();
 const collections = new Map<string, HistoryPage[]>();
 let failDocument: string | null = null;
+let heldDocument: string | null = null;
+let releaseDocument: (() => void) | undefined;
 let heldPage: number | null = null;
 let releaseHistory: (() => void) | undefined;
 
@@ -111,7 +113,9 @@ export function resetWebhookFixture() {
   collections.clear();
   failDocument = null;
   heldPage = null;
+  heldDocument = null;
   releaseHistory?.();
+  releaseDocument?.();
 }
 
 export function configureWebhookFixture(config: Record<string, unknown>) {
@@ -145,6 +149,10 @@ export function configureWebhookFixture(config: Record<string, unknown>) {
   }
   if ("hold_page" in config) heldPage = config.hold_page as number | null;
   if (config.release_history) releaseHistory?.();
+  if ("hold_document" in config) {
+    heldDocument = config.hold_document as string | null;
+  }
+  if (config.release_document) releaseDocument?.();
 }
 
 export function webhookFixtureStats() {
@@ -153,6 +161,7 @@ export function webhookFixtureStats() {
     renewals,
     document_attempts: documentAttempts,
     history_held: releaseHistory !== undefined,
+    document_held: releaseDocument !== undefined,
   };
 }
 
@@ -191,10 +200,10 @@ export function historyFixture(url: URL): Response | undefined {
   });
 }
 
-export function documentFixture(
+export async function documentFixture(
   pathname: string,
   sleepBaseline: SyntheticDocument[],
-): Response | undefined {
+): Promise<Response | undefined> {
   const match = userCollectionPath.exec(pathname);
   if (!match?.[2]) return;
   const collection = match[1];
@@ -210,8 +219,15 @@ export function documentFixture(
   const document = documents.has(fixtureKey)
     ? documents.get(fixtureKey)
     : baseline.find((value) => value.id === id);
-  if (document == null) {
-    return Response.json({ error: "not_found" }, { status: 404 });
+  const response = document == null
+    ? Response.json({ error: "not_found" }, { status: 404 })
+    : Response.json(document);
+  if (heldDocument === id) {
+    heldDocument = null;
+    await new Promise<void>((resolve) => {
+      releaseDocument = resolve;
+    });
+    releaseDocument = undefined;
   }
-  return Response.json(document);
+  return response;
 }

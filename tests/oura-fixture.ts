@@ -199,7 +199,7 @@ export async function ouraFixture(req: Request): Promise<Response> {
     return configuredHistory ?? Response.json(sleepHistory[page - 1]);
   }
   return configuredHistory ??
-    documentFixture(pathname, sleepDocuments) ??
+    await documentFixture(pathname, sleepDocuments) ??
     new Response("Fixture route missing.", { status: 404 });
 }
 

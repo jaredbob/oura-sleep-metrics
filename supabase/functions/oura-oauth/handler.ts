@@ -5,6 +5,7 @@ import {
 } from "../_shared/webhook-subscriptions.ts";
 import { runWebhookWork } from "../_shared/webhook-work.ts";
 import { runHistoryImport } from "../_shared/history.ts";
+import { requestRepair, runRepairWork } from "../_shared/repair.ts";
 import { getConnectionStatus } from "../_shared/sync-status.ts";
 import { HttpError, json } from "../_shared/http.ts";
 import { beginConsent, finishConsent } from "../_shared/oura-connection.ts";
@@ -43,6 +44,7 @@ export async function handleOuraOAuth(req: Request): Promise<Response> {
       const ownerId = requiredEnv("OURA_OWNER_ID");
       const completed = await Promise.allSettled([
         runWebhookWork(ownerId),
+        runRepairWork(ownerId),
         renewSubscriptions(),
         syncInitialHistory(ownerId, 1, true),
       ]);
@@ -71,6 +73,9 @@ export async function handleOuraOAuth(req: Request): Promise<Response> {
     }
     if (route === "/status" && req.method === "GET") {
       return json(await getConnectionStatus(await requireOwner(req)));
+    }
+    if (route === "/repair" && req.method === "POST") {
+      return json(await requestRepair(await requireOwner(req), req));
     }
     if (route === "/import" && req.method === "POST") {
       const ownerId = await requireOwner(req);

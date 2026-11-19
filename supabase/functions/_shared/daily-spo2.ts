@@ -8,6 +8,7 @@ const datePattern = /^\d{4}-\d{2}-\d{2}$/;
 
 export const dailySpo2: Collection<DailySpo2Record> = {
   name: "daily_spo2",
+  sourceTable: "public.oura_daily_spo2",
   fields: "id,day,spo2_percentage",
   parse,
   async upsert(tx, ownerId, records) {

@@ -22,9 +22,11 @@ const otherSleepTypes = ["sleep", "late_nap", "rest", "deleted"];
 
 export const sleep: Collection<SleepRecord> = {
   name: "sleep",
+  sourceTable: "oura_private.sleep_sessions",
   fields:
     "id,day,type,bedtime_start,bedtime_end,total_sleep_duration,average_hrv,hrv",
   parse,
+  shouldStore: ({ session }) => session !== null,
   async upsert(tx, ownerId, records) {
     // Clear corrected samples and remove any session Oura has reclassified.
     await tx`

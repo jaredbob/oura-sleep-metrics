@@ -10,6 +10,7 @@ const timestampPattern = /^\d{4}-\d{2}-\d{2}T[\d:.]+(?:Z|[+-]\d{2}:\d{2})$/;
 
 export const dailySleep: Collection<DailySleepRecord> = {
   name: "daily_sleep",
+  sourceTable: "public.oura_daily_sleep",
   fields: "id,day,timestamp,score",
   parse,
   async upsert(tx, ownerId, records) {

@@ -1,5 +1,6 @@
 import { collections } from "./collections.ts";
 import { sql } from "./db.ts";
+import { repairStatus } from "./repair.ts";
 import { getSubscriptionStatus } from "./webhook-subscriptions.ts";
 
 type ImportJob = {
@@ -26,10 +27,11 @@ export async function getConnectionStatus(ownerId: string) {
       connected_at: null,
       history: null,
       webhooks: null,
+      repair: null,
     };
   }
 
-  const [imports, subscriptions, deliveries] = await Promise.all([
+  const [imports, subscriptions, deliveries, repair] = await Promise.all([
     sql()<ImportJob[]>`
       select expected.collection, coalesce(jobs.status, 'pending') as status,
              coalesce(jobs.pages_imported, 0) as pages_imported, jobs.updated_at
@@ -53,6 +55,7 @@ export async function getConnectionStatus(ownerId: string) {
       ) outstanding
       group by collection
     `,
+    repairStatus(ownerId),
   ]);
 
   const completed = imports.filter((job) => job.status === "complete").length;
@@ -81,6 +84,7 @@ export async function getConnectionStatus(ownerId: string) {
       complete: completed,
       collections: imports,
     },
+    repair,
     webhooks: {
       subscriptions,
       deliveries: {

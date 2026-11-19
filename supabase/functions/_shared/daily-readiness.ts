@@ -11,6 +11,7 @@ const timestampPattern = /^\d{4}-\d{2}-\d{2}T[\d:.]+(?:Z|[+-]\d{2}:\d{2})$/;
 
 export const dailyReadiness: Collection<DailyReadinessRecord> = {
   name: "daily_readiness",
+  sourceTable: "public.oura_daily_readiness",
   fields: "id,day,timestamp,score,temperature_deviation",
   parse,
   async upsert(tx, ownerId, records) {

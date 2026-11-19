@@ -15,11 +15,19 @@ function env(name: string): string {
   return value;
 }
 
-async function api<T>(path: string, method = "GET"): Promise<T> {
+async function api<T>(
+  path: string,
+  method = "GET",
+  payload?: object,
+): Promise<T> {
   const functionsUrl = env("OURA_FUNCTIONS_URL").replace(/\/+$/, "");
   const response = await fetch(`${functionsUrl}/oura-oauth/${path}`, {
     method,
-    headers: { authorization: `Bearer ${env("OURA_OWNER_ACCESS_TOKEN")}` },
+    headers: {
+      authorization: `Bearer ${env("OURA_OWNER_ACCESS_TOKEN")}`,
+      ...(payload && { "content-type": "application/json" }),
+    },
+    body: payload ? JSON.stringify(payload) : undefined,
     redirect: "error",
   });
   const result = await response.json();
@@ -54,6 +62,15 @@ async function openBrowser(url: string) {
 
 async function main() {
   const [command, option, ...remaining] = Deno.args;
+  if (command === "repair" && option && remaining.length === 1) {
+    const status = await api<{ repair: { status: string } }>("repair", "POST", {
+      start_day: option,
+      end_day: remaining[0],
+    });
+    console.log(JSON.stringify(status));
+    if (status.repair.status === "retryable") Deno.exitCode = 1;
+    return;
+  }
   const isConnect = command === "connect" || command === "reconnect";
   if (
     remaining.length ||
@@ -61,7 +78,7 @@ async function main() {
     (!isConnect && command !== "status" && command !== "import")
   ) {
     throw new Error(
-      "Usage: oura.ts connect|reconnect [--no-open] | status | import",
+      "Usage: oura.ts connect|reconnect [--no-open] | status | import | repair START_DAY END_DAY",
     );
   }
 

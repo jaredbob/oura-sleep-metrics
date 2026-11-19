@@ -34,3 +34,23 @@ export async function applySnapshots(
     );
   }
 }
+
+// Call under the connection lock after Oura confirms the document is absent.
+export async function applyMissingDocument(
+  tx: SqlTransaction,
+  ownerId: string,
+  collection: Collection,
+  revision: string,
+  documentId: string,
+): Promise<void> {
+  const marked = await tx`
+    insert into oura_private.document_versions
+      (owner_id, collection, document_id, read_revision, deleted)
+    values (${ownerId}, ${collection.name}, ${documentId}, ${revision}::bigint, true)
+    on conflict (owner_id, collection, document_id) do update
+    set read_revision = excluded.read_revision, deleted = true
+    where document_versions.read_revision < excluded.read_revision
+    returning document_id
+  `;
+  if (marked.length) await collection.remove(tx, ownerId, documentId);
+}
