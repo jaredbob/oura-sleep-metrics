@@ -4,7 +4,7 @@ import {
   endpoint,
   equal,
   fixture,
-  readSql,
+  readOuraRows,
   required,
 } from "./oura-test-support.ts";
 
@@ -45,7 +45,7 @@ Deno.test("Healthy Oura collections import history while missing webhook coverag
     ),
     true,
   );
-  equal((await readSql("oura_nightly", "day", owner)).rows, []);
+  equal(await readOuraRows("oura_nightly", "day"), []);
 
   await fixture("configure", { fail_subscription_list: false });
   const partial = await importStatus(owner);
@@ -54,7 +54,7 @@ Deno.test("Healthy Oura collections import history while missing webhook coverag
     partial.webhooks.subscriptions.filter(
       (row: { status: string }) => row.status === "active",
     ).length,
-    11,
+    26,
   );
   const failure = partial.webhooks.subscriptions.find(
     (row: { status: string }) => row.status === "retryable",
@@ -66,8 +66,7 @@ Deno.test("Healthy Oura collections import history while missing webhook coverag
     Number.isFinite(Date.parse(failure.retry_at)),
   ], ["daily_readiness", "delete", "registration_failed", true]);
   equal(
-    (await readSql("oura_nightly", "day,sleep_score,readiness_score", owner))
-      .rows[0],
+    (await readOuraRows("oura_nightly", "day,sleep_score,readiness_score"))[0],
     { day, sleep_score: 82, readiness_score: null },
   );
 
@@ -76,7 +75,7 @@ Deno.test("Healthy Oura collections import history while missing webhook coverag
   equal(recovered.ok, true);
   const status = JSON.parse(recovered.stdout);
   equal(status.history.status, "complete");
-  equal(status.history.pages_imported, 5);
+  equal(status.history.pages_imported, 10);
   equal(
     status.webhooks.subscriptions.every(
       (row: { status: string }) => row.status === "active",
@@ -84,8 +83,7 @@ Deno.test("Healthy Oura collections import history while missing webhook coverag
     true,
   );
   equal(
-    (await readSql("oura_nightly", "day,sleep_score,readiness_score", owner))
-      .rows[0],
+    (await readOuraRows("oura_nightly", "day,sleep_score,readiness_score"))[0],
     { day, sleep_score: 82, readiness_score: 79 },
   );
 });

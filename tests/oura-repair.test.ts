@@ -4,7 +4,7 @@ import {
   endpoint,
   equal,
   fixture,
-  readSql,
+  readOuraRows,
   required,
   runWorker,
   signedNotification,
@@ -49,19 +49,17 @@ const onePage = (
   ...data: Record<string, unknown>[]
 ) => [{ data, next_token: null }];
 
-function nightly(owner: string) {
-  return readSql(
+function nightly() {
+  return readOuraRows(
     "oura_nightly",
     "day,sleep_score,readiness_score,temperature_deviation_c,average_spo2,sleep_session_document_id,average_hrv",
-    owner,
   );
 }
 
-function samples(owner: string) {
-  return readSql(
+function samples() {
+  return readOuraRows(
     "oura_hrv_samples",
     "sleep_session_document_id,sampled_at,hrv",
-    owner,
     "sleep_session_document_id,sample_index",
   );
 }
@@ -77,7 +75,7 @@ function repairRequest(token: string, start_day: string, end_day: string) {
   });
 }
 
-Deno.test("Only the owner can repair an inclusive range across all four Oura collections", async () => {
+Deno.test("Only the owner can repair an inclusive range across the Oura collections", async () => {
   const owner = required("TEST_OURA_OWNER_ACCESS_TOKEN");
   const other = required("TEST_OURA_OTHER_ACCESS_TOKEN");
   equal((await fetch(endpoint("repair"), { method: "POST" })).status, 401);
@@ -105,50 +103,48 @@ Deno.test("Only the owner can repair an inclusive range across all four Oura col
     "complete",
   ]);
   equal(Object.keys(repair.collections).sort(), [
+    "daily_cardiovascular_age",
     "daily_readiness",
+    "daily_resilience",
     "daily_sleep",
     "daily_spo2",
+    "daily_stress",
+    "enhanced_tag",
     "sleep",
+    "vo2_max",
   ]);
-  equal(await nightly(owner), {
-    status: 200,
-    rows: [
-      {
-        day,
-        sleep_score: 86,
-        readiness_score: 72,
-        temperature_deviation_c: -0.4,
-        average_spo2: 97.5,
-        sleep_session_document_id: session.id,
-        average_hrv: 54,
-      },
-      {
-        day: nextDay,
-        sleep_score: null,
-        readiness_score: null,
-        temperature_deviation_c: null,
-        average_spo2: null,
-        sleep_session_document_id: null,
-        average_hrv: null,
-      },
-    ],
-  });
-  equal(await samples(owner), {
-    status: 200,
-    rows: [
-      {
-        sleep_session_document_id: session.id,
-        sampled_at: "2024-03-10T02:00:00+00:00",
-        hrv: 54,
-      },
-      {
-        sleep_session_document_id: session.id,
-        sampled_at: "2024-03-10T02:05:00+00:00",
-        hrv: 60,
-      },
-    ],
-  });
-  equal(await nightly(other), { status: 200, rows: [] });
+  equal(await nightly(), [
+    {
+      day,
+      sleep_score: 86,
+      readiness_score: 72,
+      temperature_deviation_c: -0.4,
+      average_spo2: 97.5,
+      sleep_session_document_id: session.id,
+      average_hrv: 54,
+    },
+    {
+      day: nextDay,
+      sleep_score: null,
+      readiness_score: null,
+      temperature_deviation_c: null,
+      average_spo2: null,
+      sleep_session_document_id: null,
+      average_hrv: null,
+    },
+  ]);
+  equal(await samples(), [
+    {
+      sleep_session_document_id: session.id,
+      sampled_at: "2024-03-10T02:00:00+00:00",
+      hrv: 54,
+    },
+    {
+      sleep_session_document_id: session.id,
+      sampled_at: "2024-03-10T02:05:00+00:00",
+      hrv: 60,
+    },
+  ]);
   const status = await command(owner, "status");
   equal(JSON.parse(status.stdout).repair.status, "complete");
 });
@@ -178,7 +174,7 @@ Deno.test("An incomplete listing or failed document check preserves HRV until Ou
   equal((await fixture("stats")).document_attempts.slice(priorAttempts), [
     spo2.id,
   ]);
-  equal((await samples(owner)).rows.length, 2);
+  equal((await samples()).length, 2);
 
   await fixture("configure", {
     collections: { sleep: [firstPage, { data: [], next_token: null }] },
@@ -190,7 +186,7 @@ Deno.test("An incomplete listing or failed document check preserves HRV until Ou
   equal(failure.pages_imported, 2);
   equal(failure.phase, "checking");
   equal(failure.retry_reason, "document_check_failed");
-  equal((await samples(owner)).rows.length, 2);
+  equal((await samples()).length, 2);
 
   for (
     const type of [undefined, null, "synthetic-unrecognized-classification"]
@@ -205,41 +201,38 @@ Deno.test("An incomplete listing or failed document check preserves HRV until Ou
       JSON.parse(incomplete.stdout).repair.collections.sleep.retry_reason,
       "document_check_failed",
     );
-    equal((await samples(owner)).rows.length, 2);
-    equal((await nightly(owner)).rows[0].average_hrv, 54);
+    equal((await samples()).length, 2);
+    equal((await nightly())[0].average_hrv, 54);
   }
 
   await fixture("configure", { documents: { [session.id]: null } });
   const recovered = await command(owner, "repair", day, day);
   equal(recovered.ok, true);
   equal(JSON.parse(recovered.stdout).repair.status, "complete");
-  equal(await samples(owner), { status: 200, rows: [] });
-  const expected = {
-    status: 200,
-    rows: [
-      {
-        day,
-        sleep_score: 86,
-        readiness_score: 72,
-        temperature_deviation_c: 0.5,
-        average_spo2: null,
-        sleep_session_document_id: null,
-        average_hrv: null,
-      },
-      {
-        day: nextDay,
-        sleep_score: null,
-        readiness_score: null,
-        temperature_deviation_c: null,
-        average_spo2: 97.5,
-        sleep_session_document_id: null,
-        average_hrv: null,
-      },
-    ],
-  };
-  equal(await nightly(owner), expected);
+  equal(await samples(), []);
+  const expected = [
+    {
+      day,
+      sleep_score: 86,
+      readiness_score: 72,
+      temperature_deviation_c: 0.5,
+      average_spo2: null,
+      sleep_session_document_id: null,
+      average_hrv: null,
+    },
+    {
+      day: nextDay,
+      sleep_score: null,
+      readiness_score: null,
+      temperature_deviation_c: null,
+      average_spo2: 97.5,
+      sleep_session_document_id: null,
+      average_hrv: null,
+    },
+  ];
+  equal(await nightly(), expected);
   equal((await command(owner, "repair", day, day)).ok, true);
-  equal(await nightly(owner), expected);
+  equal(await nightly(), expected);
 });
 
 async function notify(
@@ -289,8 +282,8 @@ Deno.test("Newer webhook reads win over a stale repair page and a stale direct l
     await fixture("configure", { release_history: true });
   }
   equal((await oldPage).ok, true);
-  equal((await nightly(owner)).rows[0].sleep_score, 98);
-  equal((await samples(owner)).rows.length, 2);
+  equal((await nightly())[0].sleep_score, 98);
+  equal((await samples()).length, 2);
 
   await fixture("configure", {
     collections: {
@@ -313,13 +306,13 @@ Deno.test("Newer webhook reads win over a stale repair page and a stale direct l
       },
     });
     await notify("update", "sleep", liveSession.id);
-    equal((await nightly(owner)).rows[0].average_hrv, 78);
+    equal((await nightly())[0].average_hrv, 78);
   } finally {
     await fixture("configure", { release_document: true });
   }
   equal((await oldAbsence).ok, true);
-  equal((await nightly(owner)).rows[0].average_hrv, 78);
-  equal((await samples(owner)).rows, [
+  equal((await nightly())[0].average_hrv, 78);
+  equal(await samples(), [
     {
       sleep_session_document_id: liveSession.id,
       sampled_at: "2024-03-10T02:00:00+00:00",
@@ -350,9 +343,7 @@ Deno.test("A scheduled worker finishes repair pages after the owner request retu
   equal(queued.ok, true);
   equal(JSON.parse(queued.stdout).repair.status, "pending");
   equal(
-    (await nightly(owner)).rows.some((row: { day: string }) =>
-      row.day === last.day
-    ),
+    (await nightly()).some((row) => row.day === last.day),
     false,
   );
   equal((await runWorker()).status, 200);
@@ -361,9 +352,7 @@ Deno.test("A scheduled worker finishes repair pages after the owner request retu
   equal(repaired.status, "complete");
   equal(repaired.collections.daily_readiness.pages_imported, 15);
   equal(
-    (await nightly(owner)).rows.find((row: { day: string }) =>
-      row.day === last.day
-    )?.readiness_score,
+    (await nightly()).find((row) => row.day === last.day)?.readiness_score,
     72,
   );
 });
@@ -385,17 +374,17 @@ Deno.test("A stale webhook fetch cannot resurrect an HRV session deleted by repa
     await fixture("configure", { documents: { [local.id]: null } });
     equal((await command(owner, "repair", day, day)).ok, true);
     equal(
-      (await samples(owner)).rows.some((
-        row: { sleep_session_document_id: string },
-      ) => row.sleep_session_document_id === local.id),
+      (await samples()).some((row) =>
+        row.sleep_session_document_id === local.id
+      ),
       false,
     );
   } finally {
     await fixture("configure", { release_document: true });
   }
   await staleDelivery;
-  equal(await samples(owner), { status: 200, rows: [] });
-  equal((await nightly(owner)).rows[0].average_hrv, null);
+  equal(await samples(), []);
+  equal((await nightly())[0].average_hrv, null);
 });
 
 Deno.test("A webhook that observes a later Sleep Score protects it from a repair page in flight", async () => {
@@ -421,19 +410,15 @@ Deno.test("A webhook that observes a later Sleep Score protects it from a repair
       });
       await delivery;
       const readScore = () =>
-        readSql("oura_daily_sleep", "document_id,sleep_score", owner);
+        readOuraRows("oura_daily_sleep", "document_id,sleep_score");
       equal(
-        (await readScore()).rows.find((row: { document_id: string }) =>
-          row.document_id === id
-        )?.sleep_score,
+        (await readScore()).find((row) => row.document_id === id)?.sleep_score,
         90,
       );
       await fixture("configure", { release_history: true });
       equal((await repair).ok, true);
       equal(
-        (await readScore()).rows.find((row: { document_id: string }) =>
-          row.document_id === id
-        )?.sleep_score,
+        (await readScore()).find((row) => row.document_id === id)?.sleep_score,
         90,
       );
     } finally {
@@ -487,13 +472,12 @@ Deno.test("A webhook rereads the current Sleep Score after a repair finishes dur
     if ((await failedCount()) === 0) break;
   }
   equal(await failedCount(), 0);
-  const score = await readSql(
+  const score = await readOuraRows(
     "oura_daily_sleep",
     "document_id,sleep_score",
-    owner,
   );
   equal(
-    score.rows.find((row: { document_id: string }) => row.document_id === id)
+    score.find((row) => row.document_id === id)
       ?.sleep_score,
     90,
   );

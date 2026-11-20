@@ -1,7 +1,12 @@
+import { collections } from "./collections.ts";
 import { requiredEnv, sql } from "./db.ts";
-import { queueHistoryImport } from "./history.ts";
+import { queueHistoryImport, rewindHistory } from "./history.ts";
 import { HttpError } from "./http.ts";
-import { fetchWithAccessToken, requestTokenPair } from "./oura-auth.ts";
+import {
+  additionalScopes,
+  fetchWithAccessToken,
+  requestTokenPair,
+} from "./oura-auth.ts";
 
 export async function beginConsent(ownerId: string): Promise<string> {
   const state = randomSecret();
@@ -18,7 +23,7 @@ export async function beginConsent(ownerId: string): Promise<string> {
     response_type: "code",
     client_id: requiredEnv("OURA_CLIENT_ID"),
     redirect_uri: requiredEnv("OURA_REDIRECT_URI"),
-    scope: "daily personal spo2",
+    scope: ["daily", "personal", "spo2", ...additionalScopes].join(" "),
     state,
     code_challenge: codeChallenge,
     code_challenge_method: "S256",
@@ -93,6 +98,10 @@ export async function finishConsent(params: URLSearchParams): Promise<string> {
     );
   }
 
+  const missingScopes = pair.scopes === null
+    ? []
+    : additionalScopes.filter((scope) => !pair.scopes?.includes(scope));
+
   await sql().begin(async (tx) => {
     const [current] = await tx`
       select state_hash from oura_private.oauth_states
@@ -105,16 +114,22 @@ export async function finishConsent(params: URLSearchParams): Promise<string> {
       );
     }
 
+    const [previous] = await tx<{ missing_scopes: string[] }[]>`
+      select missing_scopes from oura_private.connections
+      where owner_id = ${ownerId} for no key update
+    `;
     const saved = await tx`
       insert into oura_private.connections (
-        owner_id, oura_user_id, status, access_token, refresh_token, expires_at
+        owner_id, oura_user_id, status, access_token, refresh_token, expires_at, missing_scopes
       )
       values (
-        ${ownerId}, ${ouraUserId}, 'connected', ${pair.accessToken}, ${pair.refreshToken}, ${pair.expiresAt}
+        ${ownerId}, ${ouraUserId}, 'connected', ${pair.accessToken}, ${pair.refreshToken}, ${pair.expiresAt},
+        ${tx.array(missingScopes)}::text[]
       )
       on conflict (owner_id) do update
       set status = 'connected', access_token = excluded.access_token, refresh_token = excluded.refresh_token,
-          expires_at = excluded.expires_at, connected_at = now(), generation = gen_random_uuid()
+          expires_at = excluded.expires_at, missing_scopes = excluded.missing_scopes,
+          connected_at = now(), generation = gen_random_uuid()
       where connections.oura_user_id = excluded.oura_user_id
     `;
     if (saved.count === 0) {
@@ -124,6 +139,27 @@ export async function finishConsent(params: URLSearchParams): Promise<string> {
       );
     }
     await queueHistoryImport(tx, ownerId);
+    const restored = collections.filter(({ scope }) =>
+      scope && previous?.missing_scopes.includes(scope) &&
+      !missingScopes.includes(scope)
+    ).map(({ name }) => name);
+    if (restored.length) {
+      await rewindHistory(tx, ownerId, restored);
+      const restoredCollections = tx.array(restored);
+      await tx`
+        update oura_private.webhook_deliveries
+        set available_at = now()
+        where owner_id = ${ownerId} and collection = any(${restoredCollections}::text[])
+          and processed_at is null and lease is null and retry_reason = 'consent_required'
+      `;
+      await tx`
+        update oura_private.repair_jobs jobs set available_at = now()
+        from oura_private.repair_runs runs
+        where runs.id = jobs.run_id and runs.owner_id = ${ownerId}
+          and jobs.collection = any(${restoredCollections}::text[])
+          and jobs.lease is null and jobs.retry_reason = 'consent_required'
+      `;
+    }
     await tx`delete from oura_private.oauth_states where owner_id = ${ownerId}`;
   });
   return ownerId;

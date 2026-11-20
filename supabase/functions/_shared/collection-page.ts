@@ -18,12 +18,12 @@ export async function readCollectionPage(
   const params = new URLSearchParams({
     start_date: startDay,
     end_date: endDay,
-    fields: collection.fields,
   });
   if (cursor.next_token) params.set("next_token", cursor.next_token);
   const response = await ouraUserFetch(
     ownerId,
-    `${collectionPath(collection)}?${params}`,
+    collectionPath(collection, undefined, params),
+    collection.scope,
   );
   if (!response.ok) {
     await response.body?.cancel();

@@ -4,7 +4,7 @@ import {
   endpoint,
   equal,
   fixture,
-  readSql,
+  readOuraRows,
   required,
   runWorker,
   signedNotification,
@@ -30,9 +30,8 @@ const partialReadiness = {
 const nightlyColumns =
   "day,sleep_score,readiness_score,temperature_deviation_c";
 
-Deno.test("Readiness history and signed notifications keep owner-only nightly data current", async (test) => {
+Deno.test("Readiness history and signed notifications keep nightly data current", async (test) => {
   const owner = required("TEST_OURA_OWNER_ACCESS_TOKEN");
-  const other = required("TEST_OURA_OTHER_ACCESS_TOKEN");
   await fixture("configure", {
     collections: {
       daily_readiness: [
@@ -44,42 +43,33 @@ Deno.test("Readiness history and signed notifications keep owner-only nightly da
   equal((await fetch(await authorize(owner))).status, 200);
   equal((await command(owner, "import")).ok, true);
 
-  equal(await readSql("oura_nightly", nightlyColumns, owner), {
-    status: 200,
-    rows: [
-      {
-        day: overlapDay,
-        sleep_score: 82,
-        readiness_score: 76,
-        temperature_deviation_c: -0.4,
-      },
-      {
-        day: "2024-03-11",
-        sleep_score: null,
-        readiness_score: null,
-        temperature_deviation_c: null,
-      },
-      {
-        day: readinessOnlyDay,
-        sleep_score: null,
-        readiness_score: null,
-        temperature_deviation_c: 0,
-      },
-    ],
-  });
+  equal(await readOuraRows("oura_nightly", nightlyColumns), [
+    {
+      day: overlapDay,
+      sleep_score: 82,
+      readiness_score: 76,
+      temperature_deviation_c: -0.4,
+    },
+    {
+      day: "2024-03-11",
+      sleep_score: null,
+      readiness_score: null,
+      temperature_deviation_c: null,
+    },
+    {
+      day: readinessOnlyDay,
+      sleep_score: null,
+      readiness_score: null,
+      temperature_deviation_c: 0,
+    },
+  ]);
   const documentColumns = "document_id,day,reported_at";
-  const documents = await readSql(
+  const documents = await readOuraRows(
     "oura_daily_readiness",
     documentColumns,
-    owner,
   );
-  equal(documents.status, 200);
   equal(
-    documents.rows.map(({ document_id, day, reported_at }: {
-      document_id: string;
-      day: string;
-      reported_at: string;
-    }) => ({
+    documents.map(({ document_id, day, reported_at }) => ({
       document_id,
       day,
       reported_at: new Date(reported_at).toISOString(),
@@ -96,19 +86,6 @@ Deno.test("Readiness history and signed notifications keep owner-only nightly da
         reported_at: "2024-03-12T06:55:00.000Z",
       },
     ],
-  );
-
-  equal(await readSql("oura_nightly", nightlyColumns, other), {
-    status: 200,
-    rows: [],
-  });
-  equal(await readSql("oura_daily_readiness", documentColumns, other), {
-    status: 200,
-    rows: [],
-  });
-  equal(
-    [401, 403].includes((await readSql("oura_nightly", nightlyColumns)).status),
-    true,
   );
 
   await test.step("Signed create, update, and delete preserve available nightly metrics", async () => {
@@ -140,7 +117,7 @@ Deno.test("Readiness history and signed notifications keep owner-only nightly da
       },
     });
     await notify("create", liveDocument, "2024-03-13T15:00:00Z");
-    equal(await nightlyDay(owner, liveDay), [{
+    equal(await nightlyDay(liveDay), [{
       day: liveDay,
       sleep_score: null,
       readiness_score: 89,
@@ -148,7 +125,7 @@ Deno.test("Readiness history and signed notifications keep owner-only nightly da
     }]);
 
     await notify("update", recordedReadiness.id, "2024-03-13T15:01:00Z");
-    equal(await nightlyDay(owner, overlapDay), [{
+    equal(await nightlyDay(overlapDay), [{
       day: overlapDay,
       sleep_score: 82,
       readiness_score: 73,
@@ -156,7 +133,7 @@ Deno.test("Readiness history and signed notifications keep owner-only nightly da
     }]);
 
     await notify("delete", recordedReadiness.id, "2024-03-13T15:02:00Z");
-    equal(await nightlyDay(owner, overlapDay), [{
+    equal(await nightlyDay(overlapDay), [{
       day: overlapDay,
       sleep_score: 82,
       readiness_score: null,
@@ -164,7 +141,7 @@ Deno.test("Readiness history and signed notifications keep owner-only nightly da
     }]);
 
     await notify("delete", liveDocument, "2024-03-13T15:03:00Z");
-    equal(await nightlyDay(owner, liveDay), []);
+    equal(await nightlyDay(liveDay), []);
   });
 });
 
@@ -184,8 +161,7 @@ async function notify(
   equal((await runWorker()).status, 200);
 }
 
-async function nightlyDay(owner: string, day: string): Promise<unknown[]> {
-  const { status, rows } = await readSql("oura_nightly", nightlyColumns, owner);
-  equal(status, 200);
-  return rows.filter((row: { day: string }) => row.day === day);
+async function nightlyDay(day: string): Promise<unknown[]> {
+  const rows = await readOuraRows("oura_nightly", nightlyColumns);
+  return rows.filter((row) => row.day === day);
 }

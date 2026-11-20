@@ -17,7 +17,11 @@ import {
   nextReadRevision,
 } from "./document-versions.ts";
 import { HttpError } from "./http.ts";
-import { ouraUserFetch, ReconnectRequired } from "./oura-auth.ts";
+import {
+  ConsentRequired,
+  ouraUserFetch,
+  ReconnectRequired,
+} from "./oura-auth.ts";
 
 type RepairJob = PageCursor & {
   run_id: string;
@@ -148,7 +152,9 @@ export async function repairStatus(ownerId: string, runId?: string) {
 
 export async function runRepairWork(ownerId: string, runId?: string) {
   const deadline = Date.now() + 8_000;
-  for (let count = 0; count < 12 && Date.now() < deadline; count++) {
+  // Allow a page per collection and keep the same room for follow-up steps.
+  const stepLimit = collections.length + 8;
+  for (let count = 0; count < stepLimit && Date.now() < deadline; count++) {
     const job = await claimJob(ownerId, runId);
     if (!job) break;
     const collection = collections.find(({ name }) => name === job.collection)!;
@@ -287,10 +293,10 @@ async function checkDocument(
   revision: string,
   documentId: string,
 ) {
-  const params = new URLSearchParams({ fields: collection.fields });
   const response = await ouraUserFetch(
     ownerId,
-    `${collectionPath(collection, documentId)}?${params}`,
+    collectionPath(collection, documentId),
+    collection.scope,
   );
   let record: OuraRecord | null = null;
   if (response.ok) {
@@ -362,6 +368,8 @@ async function failJob(job: RepairJob, error: unknown) {
   const reset = error instanceof InvalidCursor;
   const retryReason = error instanceof ReconnectRequired
     ? "connection_changed"
+    : error instanceof ConsentRequired
+    ? "consent_required"
     : reset
     ? "pagination_restarted"
     : job.document_id !== null

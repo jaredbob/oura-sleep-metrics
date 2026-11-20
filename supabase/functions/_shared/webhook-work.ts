@@ -6,7 +6,11 @@ import {
 import { collections } from "./collections.ts";
 import { sql, type SqlTransaction } from "./db.ts";
 import { nextReadRevision } from "./document-versions.ts";
-import { ouraUserFetch, ReconnectRequired } from "./oura-auth.ts";
+import {
+  ConsentRequired,
+  ouraUserFetch,
+  ReconnectRequired,
+} from "./oura-auth.ts";
 import { eventRanks } from "./webhook.ts";
 
 type Delivery = {
@@ -45,6 +49,8 @@ export async function runWebhookWork(ownerId: string): Promise<void> {
     } catch (error) {
       const retryReason = error instanceof ReconnectRequired
         ? "reconnect_required"
+        : error instanceof ConsentRequired
+        ? "consent_required"
         : error instanceof DocumentUnavailable
         ? "oura_document_unavailable"
         : error instanceof DocumentChanged
@@ -118,10 +124,10 @@ async function fetchDocument(
   collection: Collection,
   documentId: string,
 ): Promise<OuraRecord> {
-  const fields = new URLSearchParams({ fields: collection.fields });
   const response = await ouraUserFetch(
     ownerId,
-    `${collectionPath(collection, documentId)}?${fields}`,
+    collectionPath(collection, documentId),
+    collection.scope,
   );
   if (!response.ok) {
     await response.body?.cancel();

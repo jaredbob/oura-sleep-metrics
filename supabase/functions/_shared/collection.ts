@@ -1,4 +1,5 @@
 import type { SqlTransaction } from "./db.ts";
+import type { AdditionalScope } from "./oura-auth.ts";
 
 export type OuraRecord = {
   document_id: string;
@@ -7,7 +8,9 @@ export type OuraRecord = {
 
 export interface Collection<Record extends OuraRecord = OuraRecord> {
   name: string;
-  fields: string;
+  apiName?: string;
+  scope?: AdditionalScope;
+  fields?: string;
   sourceTable: string;
   shouldStore?(record: Record): boolean;
   parse(value: unknown): Record;
@@ -27,11 +30,15 @@ export interface Collection<Record extends OuraRecord = OuraRecord> {
 export function collectionPath(
   collection: Collection,
   documentId?: string,
+  params = new URLSearchParams(),
 ): string {
-  const path = `/v2/usercollection/${collection.name}`;
-  return documentId === undefined
-    ? path
-    : `${path}/${encodeURIComponent(documentId)}`;
+  const name = collection.apiName ?? collection.name;
+  const document = documentId === undefined
+    ? ""
+    : `/${encodeURIComponent(documentId)}`;
+  if (collection.fields) params.set("fields", collection.fields);
+  const query = params.size ? `?${params}` : "";
+  return `/v2/usercollection/${name}${document}${query}`;
 }
 
 export function isDay(value: unknown): value is string {

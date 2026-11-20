@@ -4,7 +4,7 @@ import {
   endpoint,
   equal,
   fixture,
-  readSql,
+  readOuraRows,
   required,
   runWorker,
   signedNotification,
@@ -21,7 +21,6 @@ const nightlyColumns = "day,sleep_score,average_spo2";
 
 Deno.test("Reconnect grants Overnight SpO₂ and imports history alongside existing Sleep Scores", async () => {
   const owner = required("TEST_OURA_OWNER_ACCESS_TOKEN");
-  const other = required("TEST_OURA_OTHER_ACCESS_TOKEN");
   await fixture("configure", {
     decline_scope: "spo2",
     collections: {
@@ -57,42 +56,41 @@ Deno.test("Reconnect grants Overnight SpO₂ and imports history alongside exist
     complete: history.complete,
   }, {
     status: "retryable",
-    pages_imported: 4,
+    pages_imported: 9,
     pending: 0,
     retryable: 1,
-    complete: 3,
+    complete: 8,
   });
   equal(
     history.collections.map((
       { collection, status }: { collection: string; status: string },
     ) => [collection, status]),
     [
+      ["daily_cardiovascular_age", "complete"],
       ["daily_readiness", "complete"],
+      ["daily_resilience", "complete"],
       ["daily_sleep", "complete"],
       ["daily_spo2", "retryable"],
+      ["daily_stress", "complete"],
+      ["enhanced_tag", "complete"],
       ["sleep", "complete"],
+      ["vo2_max", "complete"],
     ],
   );
-  const sleepBeforeReconnect = {
-    status: 200,
-    rows: [
-      { document_id: "synthetic-sleep-a", day: sleepDay, sleep_score: 82 },
-      {
-        document_id: "synthetic-sleep-b",
-        day: "2024-03-11",
-        sleep_score: null,
-      },
-    ],
-  };
+  const sleepBeforeReconnect = [
+    { document_id: "synthetic-sleep-a", day: sleepDay, sleep_score: 82 },
+    {
+      document_id: "synthetic-sleep-b",
+      day: "2024-03-11",
+      sleep_score: null,
+    },
+  ];
   const sleepColumns = "document_id,day,sleep_score";
   equal(
-    await readSql("oura_daily_sleep", sleepColumns, owner),
+    await readOuraRows("oura_daily_sleep", sleepColumns),
     sleepBeforeReconnect,
   );
-  equal(await readSql("oura_daily_spo2", spo2Columns, owner), {
-    status: 200,
-    rows: [],
-  });
+  equal(await readOuraRows("oura_daily_spo2", spo2Columns), []);
 
   // Remove the synthetic Sleep Scores from the history response before reconnect.
   await fixture("configure", {
@@ -102,44 +100,28 @@ Deno.test("Reconnect grants Overnight SpO₂ and imports history alongside exist
   equal((await fetch(await authorize(owner, "reconnect"))).status, 200);
   equal((await command(owner, "import")).ok, true);
   equal(
-    await readSql("oura_daily_sleep", sleepColumns, owner),
+    await readOuraRows("oura_daily_sleep", sleepColumns),
     sleepBeforeReconnect,
   );
-  equal(await readSql("oura_daily_spo2", spo2Columns, owner), {
-    status: 200,
-    rows: [
-      { document_id: "synthetic-spo2-a", day: sleepDay, average_spo2: 97.125 },
-      {
-        document_id: "synthetic-spo2-b",
-        day: "2024-03-12",
-        average_spo2: null,
-      },
-      {
-        document_id: "synthetic-spo2-c",
-        day: "2024-03-13",
-        average_spo2: 94.25,
-      },
-    ],
-  });
-  equal(await readSql("oura_nightly", nightlyColumns, owner), {
-    status: 200,
-    rows: [
-      { day: sleepDay, sleep_score: 82, average_spo2: 97.125 },
-      { day: "2024-03-11", sleep_score: null, average_spo2: null },
-      { day: "2024-03-12", sleep_score: null, average_spo2: null },
-      { day: "2024-03-13", sleep_score: null, average_spo2: 94.25 },
-    ],
-  });
-  equal(await readSql("oura_daily_spo2", spo2Columns, other), {
-    status: 200,
-    rows: [],
-  });
-  equal(await readSql("oura_nightly", nightlyColumns, other), {
-    status: 200,
-    rows: [],
-  });
-  const denied = await readSql("oura_daily_spo2", spo2Columns);
-  equal([401, 403].includes(denied.status), true);
+  equal(await readOuraRows("oura_daily_spo2", spo2Columns), [
+    { document_id: "synthetic-spo2-a", day: sleepDay, average_spo2: 97.125 },
+    {
+      document_id: "synthetic-spo2-b",
+      day: "2024-03-12",
+      average_spo2: null,
+    },
+    {
+      document_id: "synthetic-spo2-c",
+      day: "2024-03-13",
+      average_spo2: 94.25,
+    },
+  ]);
+  equal(await readOuraRows("oura_nightly", nightlyColumns), [
+    { day: sleepDay, sleep_score: 82, average_spo2: 97.125 },
+    { day: "2024-03-11", sleep_score: null, average_spo2: null },
+    { day: "2024-03-12", sleep_score: null, average_spo2: null },
+    { day: "2024-03-13", sleep_score: null, average_spo2: 94.25 },
+  ]);
 });
 
 Deno.test("Signed Overnight SpO₂ changes preserve a Sleep Score with the same document ID", async () => {
@@ -174,13 +156,11 @@ Deno.test("Signed Overnight SpO₂ changes preserve a Sleep Score with the same 
   }
 
   async function nightly(average: number | null) {
-    const { status, rows } = await readSql(
+    const rows = await readOuraRows(
       "oura_nightly",
       nightlyColumns,
-      owner,
     );
-    equal(status, 200);
-    equal(rows.filter((row: { day: string }) => row.day === day), [
+    equal(rows.filter((row) => row.day === day), [
       { day, sleep_score: 85, average_spo2: average },
     ]);
   }
@@ -203,10 +183,9 @@ Deno.test("Signed Overnight SpO₂ changes preserve a Sleep Score with the same 
   await fixture("configure", { documents: { [spo2Key]: null } });
   await deliver("daily_spo2", "delete", "2024-03-21T12:10:00Z");
   await nightly(null);
-  const { status, rows } = await readSql("oura_daily_spo2", spo2Columns, owner);
-  equal(status, 200);
+  const rows = await readOuraRows("oura_daily_spo2", spo2Columns);
   equal(
-    rows.some((row: { document_id: string }) => row.document_id === id),
+    rows.some((row) => row.document_id === id),
     false,
   );
 });

@@ -2,6 +2,10 @@ import { requiredEnv, sql } from "./db.ts";
 import { ouraApiFetch } from "./oura-api.ts";
 
 export class ReconnectRequired extends Error {}
+export class ConsentRequired extends Error {}
+
+export const additionalScopes = ["tag", "heart_health", "stress"] as const;
+export type AdditionalScope = typeof additionalScopes[number];
 
 class InvalidGrant extends Error {}
 
@@ -9,6 +13,7 @@ type TokenPair = {
   accessToken: string;
   refreshToken: string;
   expiresAt: Date;
+  scopes: string[] | null;
 };
 
 export async function requestTokenPair(
@@ -45,12 +50,18 @@ export async function requestTokenPair(
     accessToken: payload.access_token,
     refreshToken: payload.refresh_token,
     expiresAt,
+    scopes: typeof payload.scope === "string"
+      ? payload.scope.trim().split(/\s+/).map((scope: string) =>
+        scope.replace(/^extapi:/, "")
+      )
+      : null,
   };
 }
 
 export async function getAccessToken(
   ownerId: string,
   rejectedToken?: string,
+  scope?: AdditionalScope,
 ): Promise<string> {
   const token = await sql().begin(async (tx) => {
     const [connection] = await tx<{
@@ -58,13 +69,18 @@ export async function getAccessToken(
       access_token: string;
       refresh_token: string;
       usable: boolean;
+      missing_scopes: string[];
     }[]>`
-      select status, access_token, refresh_token, expires_at > clock_timestamp() as usable
+      select status, access_token, refresh_token, missing_scopes,
+             expires_at > clock_timestamp() as usable
       from oura_private.connections
       where owner_id = ${ownerId}
       for no key update
     `;
     if (connection?.status !== "connected") return null;
+    if (scope && connection.missing_scopes.includes(scope)) {
+      throw new ConsentRequired();
+    }
     if (connection.usable && connection.access_token !== rejectedToken) {
       return connection.access_token;
     }
@@ -98,16 +114,28 @@ export async function getAccessToken(
 export async function ouraUserFetch(
   ownerId: string,
   path: string,
+  scope?: AdditionalScope,
 ): Promise<Response> {
-  const accessToken = await getAccessToken(ownerId);
-  const response = await fetchWithAccessToken(path, accessToken);
+  const accessToken = await getAccessToken(ownerId, undefined, scope);
+  const response = await fetchWithConsent(ownerId, path, accessToken, scope);
   if (response.status !== 401) return response;
   await response.body?.cancel();
 
-  const freshToken = await getAccessToken(ownerId, accessToken);
-  const retry = await fetchWithAccessToken(path, freshToken);
+  const freshToken = await getAccessToken(ownerId, accessToken, scope);
+  const retry = await fetchWithConsent(ownerId, path, freshToken, scope);
   if (retry.status !== 401) return retry;
   await retry.body?.cancel();
+  if (scope) {
+    // A collection-level rejection can occur even when the refreshed token works.
+    const identity = await fetchWithAccessToken(
+      "/v2/usercollection/personal_info",
+      freshToken,
+    );
+    await identity.body?.cancel();
+    if (identity.status !== 401) {
+      throw new Error("Oura collection authorization failed.");
+    }
+  }
   const updated = await sql()`
     update oura_private.connections
     set status = 'reconnect_required', access_token = null, refresh_token = null, expires_at = null
@@ -115,6 +143,46 @@ export async function ouraUserFetch(
   `;
   if (updated.count > 0) throw new ReconnectRequired();
   throw new Error("The Oura connection changed during a request.");
+}
+
+async function fetchWithConsent(
+  ownerId: string,
+  path: string,
+  token: string,
+  scope?: AdditionalScope,
+): Promise<Response> {
+  const response = await fetchWithAccessToken(path, token);
+  if (!scope || (response.status !== 401 && response.status !== 403)) {
+    return response;
+  }
+
+  const challenge = response.headers.get("www-authenticate") ?? "";
+  const body = await response.json().catch(() => null);
+  const insufficientScope =
+    /\berror\s*=\s*"?insufficient_scope\b/i.test(challenge) ||
+    [body, body?.error, body?.detail, body?.error_description, body?.title]
+      .some(
+        (field) =>
+          typeof field === "string" &&
+          (/\binsufficient[_ ]scope\b/i.test(field) ||
+            field.toLowerCase().includes(
+              `not authorized access ${scope} scope`,
+            )),
+      );
+  if (!insufficientScope) {
+    return new Response(null, { status: response.status });
+  }
+
+  const updated = await sql()`
+    update oura_private.connections
+    set missing_scopes = case when ${scope} = any(missing_scopes) then missing_scopes
+                              else array_append(missing_scopes, ${scope}) end
+    where owner_id = ${ownerId} and access_token = ${token} and status = 'connected'
+  `;
+  if (updated.count === 0) {
+    throw new Error("The Oura connection changed during a request.");
+  }
+  throw new ConsentRequired();
 }
 
 export function fetchWithAccessToken(
