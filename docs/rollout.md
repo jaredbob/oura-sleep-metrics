@@ -1,5 +1,9 @@
 # Manual Oura rollout on Supabase
 
+See the [Oura webhook sequence diagram](webhook-flow.md) for the request paths
+used during OAuth, subscription registration, webhook delivery, and scheduled
+processing.
+
 ## 1. Apply the database migrations
 
 In the existing Supabase project that holds the owner's health data, review and
