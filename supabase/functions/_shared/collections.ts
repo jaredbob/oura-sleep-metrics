@@ -1,3 +1,10 @@
+import {
+  dailyCardiovascularAge,
+  dailyResilience,
+  dailyStress,
+  enhancedTag,
+  vo2Max,
+} from "./additional-collections.ts";
 import type { Collection } from "./collection.ts";
 import { dailyReadiness } from "./daily-readiness.ts";
 import { dailySleep } from "./daily-sleep.ts";
@@ -9,4 +16,9 @@ export const collections: readonly Collection[] = [
   dailySpo2,
   dailyReadiness,
   sleep,
+  enhancedTag,
+  dailyCardiovascularAge,
+  vo2Max,
+  dailyStress,
+  dailyResilience,
 ];

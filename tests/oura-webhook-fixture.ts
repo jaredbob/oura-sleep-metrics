@@ -8,7 +8,9 @@ type Subscription = {
   expiration_time: string;
 };
 
-type SyntheticDocument = { id: string; day: string } & Record<string, unknown>;
+type SyntheticDocument =
+  & { id: string; day?: string; start_day?: string }
+  & Record<string, unknown>;
 type HistoryPage = { data: SyntheticDocument[]; next_token: string | null };
 
 const userCollectionPath = /^\/v2\/usercollection\/([^/]+)(?:\/([^/]+))?$/;
@@ -199,7 +201,18 @@ export function historyFixture(url: URL): Response | undefined {
   if (!match || match[2]) return;
   const pages = collections.get(match[1]);
   if (!pages) {
-    if (["daily_readiness", "daily_spo2", "sleep"].includes(match[1])) {
+    if (
+      [
+        "daily_readiness",
+        "daily_spo2",
+        "sleep",
+        "enhanced_tag",
+        "daily_cardiovascular_age",
+        "vO2_max",
+        "daily_stress",
+        "daily_resilience",
+      ].includes(match[1])
+    ) {
       return Response.json({ data: [], next_token: null });
     }
     return;
@@ -216,7 +229,10 @@ export function historyFixture(url: URL): Response | undefined {
   const end = url.searchParams.get("end_date") ?? "9999-12-31";
   return Response.json({
     ...page,
-    data: page.data.filter(({ day }) => day >= start && day <= end),
+    data: page.data.filter(({ day, start_day }) => {
+      const documentDay = start_day ?? day ?? "";
+      return documentDay >= start && documentDay < end;
+    }),
   });
 }
 

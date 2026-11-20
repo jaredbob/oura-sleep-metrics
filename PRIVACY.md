@@ -1,6 +1,6 @@
 # Privacy Policy
 
-Last updated November 18, 2026
+Last updated November 19, 2026
 
 Personal Sleep Metrics is a planned integration for one account owner to track
 their sleep and recovery. This policy describes how the integration will
@@ -11,8 +11,11 @@ handle data once the owner enables it and authorizes access in Oura.
 With the owner's permission, the integration will import available history and
 receive updates for Sleep Score, Readiness Score, nighttime temperature
 deviation, average overnight blood oxygen (SpO₂), and average and five-minute
-heart rate variability from the main sleep session. The owner can query those
-readings alongside their other personal health metrics.
+heart rate variability from the main sleep session. The integration also
+imports Enhanced Tag codes, custom names, dates, and times, Cardiovascular Age
+and pulse wave velocity, VO₂ Max, Daily Stress durations and summaries, and
+Daily Resilience levels and contributors. Optional tag comments are discarded.
+The owner can query these records alongside their other personal health metrics.
 
 To connect the accounts and keep records current, the integration will process
 account and record identifiers, dates and timestamps, OAuth credentials, and

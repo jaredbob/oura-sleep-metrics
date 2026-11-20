@@ -1,6 +1,6 @@
 import { collections } from "./collections.ts";
 import { requiredEnv, sql, type SqlTransaction } from "./db.ts";
-import { queueHistoryImport } from "./history.ts";
+import { queueHistoryImport, rewindHistory } from "./history.ts";
 import { ouraApiFetch } from "./oura-api.ts";
 import { eventRanks } from "./webhook.ts";
 
@@ -178,15 +178,7 @@ export async function ensureSubscriptions(
 
     // Rewind only the history whose coverage was restored after a gap.
     if (restored.length > 0) {
-      await tx`
-        update oura_private.import_jobs
-        set revision = gen_random_uuid(), next_token = null, page_tokens = '{}',
-            status = 'pending', pages_imported = 0,
-            end_day = greatest(end_day, current_date + 2), updated_at = now(), available_at = now()
-        where owner_id = ${ownerId} and collection = any(${
-        tx.array(restored)
-      }::text[])
-      `;
+      await rewindHistory(tx, ownerId, restored);
     }
     return covered;
   });

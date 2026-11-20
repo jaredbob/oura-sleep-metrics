@@ -4,7 +4,7 @@ import {
   endpoint,
   equal,
   fixture,
-  readSql,
+  readOuraRows,
   required,
   runWorker,
   signedNotification,
@@ -50,19 +50,17 @@ const missing = {
   hrv: null,
 };
 
-function nightly(token?: string) {
-  return readSql(
+function nightly() {
+  return readOuraRows<NightlyRow>(
     "oura_nightly",
     "day,sleep_score,sleep_session_document_id,average_hrv",
-    token,
   );
 }
 
-function samples(token?: string) {
-  return readSql(
+function samples() {
+  return readOuraRows<HrvSample>(
     "oura_hrv_samples",
     "sleep_session_document_id,sample_index,sampled_at,hrv",
-    token,
     "sleep_session_document_id,sample_index",
   );
 }
@@ -86,56 +84,52 @@ Deno.test("History imports Main Sleep Session HRV by Oura day and timestamped sa
   });
   equal((await fetch(await authorize(owner))).status, 200);
   equal((await command(owner, "import")).ok, true);
-  equal(await nightly(owner), {
-    status: 200,
-    rows: [
-      {
-        day: "2024-03-10",
-        sleep_score: 82,
-        sleep_session_document_id: mainSession.id,
-        average_hrv: 57,
-      },
-      {
-        day: "2024-03-11",
-        sleep_score: null,
-        sleep_session_document_id: null,
-        average_hrv: null,
-      },
-      {
-        day: "2024-03-20",
-        sleep_score: null,
-        sleep_session_document_id: missing.id,
-        average_hrv: null,
-      },
-    ],
-  });
-  equal(await samples(owner), {
-    status: 200,
-    rows: [
-      {
-        sleep_session_document_id: mainSession.id,
-        sample_index: 0,
-        sampled_at: "2024-03-09T10:55:00.123456+00:00",
-        hrv: 57.5,
-      },
-      {
-        sleep_session_document_id: mainSession.id,
-        sample_index: 1,
-        sampled_at: "2024-03-09T11:00:00.123456+00:00",
-        hrv: null,
-      },
-      {
-        sleep_session_document_id: mainSession.id,
-        sample_index: 2,
-        sampled_at: "2024-03-09T11:05:00.123456+00:00",
-        hrv: 0,
-      },
-    ],
-  });
-  const other = required("TEST_OURA_OTHER_ACCESS_TOKEN");
-  equal(await nightly(other), { status: 200, rows: [] });
-  equal(await samples(other), { status: 200, rows: [] });
-  equal((await samples()).status, 401);
+  equal(await nightly(), [
+    {
+      day: "2024-03-10",
+      sleep_score: 82,
+      sleep_session_document_id: mainSession.id,
+      average_hrv: 57,
+    },
+    {
+      day: "2024-03-11",
+      sleep_score: null,
+      sleep_session_document_id: null,
+      average_hrv: null,
+    },
+    {
+      day: "2024-03-20",
+      sleep_score: null,
+      sleep_session_document_id: missing.id,
+      average_hrv: null,
+    },
+  ]);
+  equal(await samples(), [
+    {
+      sleep_session_document_id: mainSession.id,
+      sample_index: 0,
+      sampled_at: "2024-03-09T10:55:00.123456+00:00",
+      hrv: 57.5,
+    },
+    {
+      sleep_session_document_id: mainSession.id,
+      sample_index: 1,
+      sampled_at: "2024-03-09T11:00:00.123456+00:00",
+      hrv: null,
+    },
+    {
+      sleep_session_document_id: mainSession.id,
+      sample_index: 2,
+      sampled_at: "2024-03-09T11:05:00.123456+00:00",
+      hrv: 0,
+    },
+    {
+      sleep_session_document_id: alternate.id,
+      sample_index: 0,
+      sampled_at: "2024-03-09T10:55:00.123456+00:00",
+      hrv: 38,
+    },
+  ]);
 });
 
 async function notify(
@@ -162,11 +156,9 @@ type NightlyRow = {
 };
 
 async function readNight(
-  owner: string,
   day: string,
 ): Promise<NightlyRow | null> {
-  const { status, rows } = await nightly(owner);
-  equal(status, 200);
+  const rows = await nightly();
   return rows.find((row: NightlyRow) => row.day === day) ?? null;
 }
 
@@ -178,18 +170,15 @@ type HrvSample = {
 };
 
 async function readSessionSamples(
-  owner: string,
   documentId: string,
 ): Promise<HrvSample[]> {
-  const { status, rows } = await samples(owner);
-  equal(status, 200);
+  const rows = await samples();
   return rows.filter((row: HrvSample) =>
     row.sleep_session_document_id === documentId
   );
 }
 
 Deno.test("Signed Sleep Session deliveries create, replace, and delete the corresponding HRV samples", async () => {
-  const owner = required("TEST_OURA_OWNER_ACCESS_TOKEN");
   const session = {
     ...mainSession,
     id: "synthetic-live-main-session",
@@ -205,13 +194,13 @@ Deno.test("Signed Sleep Session deliveries create, replace, and delete the corre
   };
   await fixture("configure", { documents: { [session.id]: session } });
   await notify("create", session.id, "2024-03-22T01:00:00Z");
-  equal(await readNight(owner, session.day), {
+  equal(await readNight(session.day), {
     day: session.day,
     sleep_score: null,
     sleep_session_document_id: session.id,
     average_hrv: 63,
   });
-  equal(await readSessionSamples(owner, session.id), [
+  equal(await readSessionSamples(session.id), [
     {
       sleep_session_document_id: session.id,
       sample_index: 0,
@@ -234,14 +223,14 @@ Deno.test("Signed Sleep Session deliveries create, replace, and delete the corre
   };
   await fixture("configure", { documents: { [session.id]: corrected } });
   await notify("update", session.id, "2024-03-22T01:10:00Z");
-  equal(await readNight(owner, session.day), null);
-  equal(await readNight(owner, corrected.day), {
+  equal(await readNight(session.day), null);
+  equal(await readNight(corrected.day), {
     day: corrected.day,
     sleep_score: null,
     sleep_session_document_id: session.id,
     average_hrv: 42,
   });
-  equal(await readSessionSamples(owner, session.id), [
+  equal(await readSessionSamples(session.id), [
     {
       sleep_session_document_id: session.id,
       sample_index: 0,
@@ -252,18 +241,17 @@ Deno.test("Signed Sleep Session deliveries create, replace, and delete the corre
 
   await notify("delete", session.id, "2024-03-22T01:20:00Z");
   await notify("update", session.id, "2024-03-22T01:15:00Z");
-  equal(await readNight(owner, corrected.day), null);
-  equal(await readSessionSamples(owner, session.id), []);
+  equal(await readNight(corrected.day), null);
+  equal(await readSessionSamples(session.id), []);
 });
 
 Deno.test("A Sleep Session reclassified as a nap stops contributing HRV", async () => {
-  const owner = required("TEST_OURA_OWNER_ACCESS_TOKEN");
   await fixture("configure", {
     documents: { [mainSession.id]: { id: mainSession.id, day: sleepDay } },
   });
   await notify("update", mainSession.id, "2024-03-22T01:50:00Z");
   equal(
-    (await readSessionSamples(owner, mainSession.id)).map(({ hrv }) => hrv),
+    (await readSessionSamples(mainSession.id)).map(({ hrv }) => hrv),
     [
       57.5,
       null,
@@ -275,15 +263,15 @@ Deno.test("A Sleep Session reclassified as a nap stops contributing HRV", async 
     documents: { [mainSession.id]: { ...mainSession, type: "late_nap" } },
   });
   await notify("update", mainSession.id, "2024-03-22T02:00:00Z");
-  equal(await readNight(owner, sleepDay), {
+  equal(await readNight(sleepDay), {
     day: sleepDay,
     sleep_score: 82,
     sleep_session_document_id: alternate.id,
     average_hrv: 38,
   });
-  equal(await readSessionSamples(owner, mainSession.id), []);
+  equal(await readSessionSamples(mainSession.id), []);
   equal(
-    (await readSessionSamples(owner, alternate.id)).map(({ hrv }) => hrv),
+    (await readSessionSamples(alternate.id)).map(({ hrv }) => hrv),
     [38],
   );
 });

@@ -22,6 +22,7 @@ let account = "synthetic-oura-account";
 let failPage: number | null = null;
 let rejectRefresh = false;
 let declinedScope: string | null = null;
+let reportScopes = false;
 let exchanges = 0;
 let refreshes = 0;
 let historyAttempts: number[] = [];
@@ -37,6 +38,8 @@ function issueTokens({ account, scopes }: Grant): Response {
     access_token: access,
     refresh_token: refresh,
     expires_in: 3_600,
+    ...(reportScopes &&
+      { scope: scopes.map((scope) => `extapi:${scope}`).join(" ") }),
   });
 }
 
@@ -71,6 +74,7 @@ export async function ouraFixture(req: Request): Promise<Response> {
     failPage = null;
     rejectRefresh = false;
     declinedScope = null;
+    reportScopes = false;
     exchanges = 0;
     refreshes = 0;
     historyAttempts = [];
@@ -84,6 +88,7 @@ export async function ouraFixture(req: Request): Promise<Response> {
     if ("account_id" in config) account = config.account_id;
     if ("reject_refresh" in config) rejectRefresh = config.reject_refresh;
     if ("decline_scope" in config) declinedScope = config.decline_scope;
+    if ("report_scopes" in config) reportScopes = config.report_scopes === true;
     if (config.reject_access) {
       for (const token of accessTokens.values()) token.active = false;
     }
@@ -179,6 +184,28 @@ export async function ouraFixture(req: Request): Promise<Response> {
     !token.scopes.includes("spo2")
   ) {
     return Response.json({ error: "insufficient_scope" }, { status: 403 });
+  }
+  const collection = pathname.split("/")[3];
+  const additionalScopes: Record<string, string> = {
+    enhanced_tag: "tag",
+    daily_cardiovascular_age: "heart_health",
+    vO2_max: "heart_health",
+    daily_stress: "stress",
+    daily_resilience: "stress",
+  };
+  const scope = additionalScopes[collection];
+  if (
+    (collection === "enhanced_tag" || collection === "daily_resilience") &&
+    searchParams.has("fields")
+  ) {
+    return Response.json({ error: "unsupported_fields" }, { status: 422 });
+  }
+  if (scope && !token.scopes.includes(scope)) {
+    return scope === "stress"
+      ? Response.json({
+        detail: "Token is not authorized access stress scope.",
+      }, { status: 401 })
+      : Response.json({ error: "insufficient_scope" }, { status: 403 });
   }
   const configuredHistory = historyFixture(url);
   if (pathname === "/v2/usercollection/daily_sleep") {

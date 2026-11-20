@@ -7,7 +7,7 @@ import {
 import { collections } from "./collections.ts";
 import { sql, type SqlTransaction } from "./db.ts";
 import { applySnapshots, nextReadRevision } from "./document-versions.ts";
-import { ReconnectRequired } from "./oura-auth.ts";
+import { ConsentRequired, ReconnectRequired } from "./oura-auth.ts";
 
 type Job = PageCursor & {
   revision: string;
@@ -26,6 +26,22 @@ export async function queueHistoryImport(tx: SqlTransaction, ownerId: string) {
     tx.array(collections.map(({ name }) => name))
   }::text[]) as collection
     on conflict (owner_id, collection) do nothing
+  `;
+}
+
+export async function rewindHistory(
+  tx: SqlTransaction,
+  ownerId: string,
+  collectionNames: string[],
+) {
+  await tx`
+    update oura_private.import_jobs
+    set revision = gen_random_uuid(), next_token = null, page_tokens = '{}',
+        status = 'pending', pages_imported = 0,
+        end_day = greatest(end_day, current_date + 2), updated_at = now(), available_at = now()
+    where owner_id = ${ownerId} and collection = any(${
+    tx.array(collectionNames)
+  }::text[])
   `;
 }
 
@@ -56,6 +72,7 @@ async function importCollection(
       join oura_private.connections using (owner_id)
       where owner_id = ${ownerId} and collection = ${collection.name}
         and connections.status = 'connected' and jobs.status <> 'complete'
+        and ${collection.scope ?? ""} <> all(connections.missing_scopes)
         and (not ${scheduled} or jobs.available_at <= now())
     `;
     if (!job) break;
@@ -101,7 +118,9 @@ async function importCollection(
         );
       });
     } catch (error) {
-      if (error instanceof ReconnectRequired) break;
+      if (
+        error instanceof ReconnectRequired || error instanceof ConsentRequired
+      ) break;
       const reset = error instanceof InvalidCursor;
       await sql()`
         update oura_private.import_jobs

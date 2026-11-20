@@ -26,8 +26,10 @@ environment file outside this repository.
 | `OURA_WEBHOOK_URL` (optional)     | Defaults to the `/webhook` endpoint next to the callback             |
 
 Use the exact callback URL already registered with the Oura API application.
-Supabase supplies the function's database and Auth configuration. The function
-requests the `daily`, `personal`, and `spo2` Oura scopes.
+Supabase supplies the function's database and Auth configuration. In the
+[Oura API application settings](https://cloud.ouraring.com/oauth/applications),
+enable Tag, Heart Health, and Stress. The function requests
+`daily personal spo2 tag heart_health stress`.
 
 Deploy only `oura-oauth` from the repository root using Supabase CLI v3.
 
@@ -115,32 +117,38 @@ coverage and queued deliveries, and the latest requested range repair. History
 advances for each collection once its create, update, and delete subscriptions
 are active. Status shows which subscription registrations are retryable while
 healthy collections continue. Use `reconnect --no-open` with the same Oura
-account if access needs to be restored. The worker advances initial import in
-batches. `scripts/oura.ts import` advances it on demand with the same Deno
-permissions.
+account to grant the three new permissions on an existing connection or to
+restore access. A history collection with `retry_reason: "consent_required"`
+needs that step. The worker advances initial import in batches.
+`scripts/oura.ts import` advances it on demand with the same Deno permissions.
+After reconnecting, check that both `daily_stress` and `daily_resilience`
+complete and that all three webhook events are active for each new collection.
 
-Query `public.oura_nightly` using the authenticated owner identity. For a manual
-check in the SQL Editor, run the query in a transaction under that role.
+Use the SQL Editor or a direct Postgres connection with an authorized database
+role to query Oura data. The Oura tables and views are unavailable through
+the Data API.
 
 ```sql
-begin;
-set local role authenticated;
-select set_config('request.jwt.claim.sub', '<owner-auth-user-uuid>', true);
-
 select owner_id, day, sleep_score, readiness_score, temperature_deviation_c,
        average_spo2, sleep_session_document_id, average_hrv
 from public.oura_nightly
 order by day desc
 limit 7;
-
-rollback;
 ```
 
 The `day` column is the Oura-reported date. Compare day boundaries before
 joining it to the dates in another health source, and use the appropriate
-mapping between `owner_id` and the other source's user identifier. The
-`public.oura_hrv_samples` relation is available to the authenticated owner by
-`sleep_session_document_id`.
+mapping between `owner_id` and the other source's user identifier. Query
+`public.oura_hrv_samples` by `sleep_session_document_id`.
+
+The additional collections are in
+`public.oura_enhanced_tag`, `public.oura_daily_cardiovascular_age`,
+`public.oura_vo2_max`, `public.oura_daily_stress`, and
+`public.oura_daily_resilience`. Join on `owner_id` and the relevant Oura
+date. For tags, `day` is the start day. To find tags spanning a date, use
+`day <= target_day` and `coalesce(end_day, day) >= target_day`.
+Tag timestamps preserve the provider's local time and any reported offset.
+Daily Stress durations are stored in seconds.
 
 ## Repair a missed range
 
@@ -156,6 +164,9 @@ a fresh repair after it completes. A repair checks omitted local IDs against
 their individual Oura endpoints after the collection listing completes. An Oura
 response confirming absence removes the corresponding reading and any dependent
 HRV samples.
+
+For Enhanced Tags, repair uses the Oura-reported start day. To repair a tag
+that spans multiple dates, include its start day in the requested range.
 
 ## Verify with synthetic Oura data
 

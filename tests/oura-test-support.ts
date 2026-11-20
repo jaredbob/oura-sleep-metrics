@@ -1,3 +1,5 @@
+import postgres from "npm:postgres@3.4.9";
+
 export function required(name: string): string {
   const value = Deno.env.get(name);
   if (!value) throw new Error(`Missing ${name}`);
@@ -59,11 +61,10 @@ export async function authorize(ownerToken: string, action = "connect") {
   return callback;
 }
 
-export async function readSql(
+async function readDataApi(
   relation: string,
   select: string,
   token?: string,
-  order = "day",
 ) {
   const headers = new Headers({
     apikey: required("TEST_OURA_SUPABASE_ANON_KEY"),
@@ -74,9 +75,10 @@ export async function readSql(
     `/rest/v1/${relation}`,
     required("TEST_OURA_SUPABASE_URL"),
   );
-  url.search = new URLSearchParams({ select, order }).toString();
+  url.search = new URLSearchParams({ select }).toString();
   const response = await fetch(url, { headers });
-  return { status: response.status, rows: await response.json() };
+  await response.body?.cancel();
+  return response.status;
 }
 
 export function endpoint(route: string): URL {
@@ -122,4 +124,56 @@ export function runWorker(): Promise<Response> {
     method: "POST",
     headers: { authorization: `Bearer ${required("OURA_WORKER_SECRET")}` },
   });
+}
+
+export async function readOuraRows<Row extends object = postgres.Row>(
+  relation: string,
+  columns: string,
+  order = "day",
+) {
+  const database = postgres(required("TEST_OURA_DB_URL"), {
+    max: 1,
+    connection: { TimeZone: "UTC" },
+  });
+  try {
+    const fields = columns === "*" ? database`*` : database(columns.split(","));
+    const rows = await database<{ reading: Row }[]>`
+      select row_to_json(reading) as reading
+      from (
+        select ${fields} from ${database(`public.${relation}`)}
+        order by ${database(order.split(","))}
+      ) reading
+    `;
+    return rows.map(({ reading }) => reading);
+  } finally {
+    await database.end();
+  }
+}
+
+export async function assertOuraDataApiDenied() {
+  const owner = required("TEST_OURA_OWNER_ACCESS_TOKEN");
+  const other = required("TEST_OURA_OTHER_ACCESS_TOKEN");
+  for (
+    const relation of [
+      "oura_daily_sleep",
+      "oura_daily_readiness",
+      "oura_daily_spo2",
+      "oura_hrv_samples",
+      "oura_nightly",
+      "oura_enhanced_tag",
+      "oura_daily_cardiovascular_age",
+      "oura_vo2_max",
+      "oura_daily_stress",
+      "oura_daily_resilience",
+    ]
+  ) {
+    for (const token of [owner, other, undefined]) {
+      const status = await readDataApi(relation, "owner_id", token);
+      if (![401, 403, 404].includes(status)) {
+        throw new Error(
+          `Expected Data API denial for ${relation}, received HTTP ${status}.`,
+        );
+      }
+    }
+  }
 }

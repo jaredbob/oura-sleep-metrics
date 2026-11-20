@@ -3,7 +3,7 @@ import {
   command,
   equal,
   fixture,
-  readSql,
+  readOuraRows,
   required,
 } from "./oura-test-support.ts";
 
@@ -22,14 +22,16 @@ Deno.test("Only the Supabase owner can start Oura consent", async () => {
   );
   equal(owner.ok, true);
   const consent = new URL(JSON.parse(owner.stdout).authorization_url);
-  equal(consent.searchParams.get("scope"), "daily personal spo2");
+  equal(
+    consent.searchParams.get("scope"),
+    "daily personal spo2 tag heart_health stress",
+  );
   equal(consent.searchParams.get("code_challenge_method"), "S256");
   equal(Boolean(consent.searchParams.get("state")), true);
 });
 
 Deno.test("Consent binds the owner, serializes refresh, and resumes paginated Sleep Scores", async () => {
   const owner = required("TEST_OURA_OWNER_ACCESS_TOKEN");
-  const other = required("TEST_OURA_OTHER_ACCESS_TOKEN");
   await fixture("reset", {});
 
   const callback = await authorize(owner);
@@ -64,7 +66,7 @@ Deno.test("Consent binds the owner, serializes refresh, and resumes paginated Sl
     1,
   );
   equal((await fixture("stats")).refreshes, 1);
-  equal((await readSql("oura_nightly", "day,sleep_score", owner)).rows, [
+  equal(await readOuraRows("oura_nightly", "day,sleep_score"), [
     { day: "2024-03-10", sleep_score: 82 },
   ]);
 
@@ -99,20 +101,16 @@ Deno.test("Consent binds the owner, serializes refresh, and resumes paginated Sl
     ).pages_imported,
     2,
   );
-  const nightly = await readSql("oura_nightly", "day,sleep_score", owner);
-  equal(nightly, {
-    status: 200,
-    rows: [{ day: "2024-03-10", sleep_score: 82 }, {
-      day: "2024-03-11",
-      sleep_score: null,
-    }],
-  });
-  const { rows } = await readSql(
+  const nightly = await readOuraRows("oura_nightly", "day,sleep_score");
+  equal(nightly, [{ day: "2024-03-10", sleep_score: 82 }, {
+    day: "2024-03-11",
+    sleep_score: null,
+  }]);
+  const rows = await readOuraRows(
     "oura_daily_sleep",
     "document_id,day,reported_at",
-    owner,
   );
-  equal(rows.map((row: { document_id: string }) => row.document_id), [
+  equal(rows.map((row) => row.document_id), [
     "synthetic-sleep-a",
     "synthetic-sleep-b",
   ]);
@@ -120,14 +118,4 @@ Deno.test("Consent binds the owner, serializes refresh, and resumes paginated Sl
     new Date(rows[0].reported_at).toISOString(),
     "2024-03-10T15:15:00.000Z",
   );
-  equal(await readSql("oura_nightly", "day,sleep_score", other), {
-    status: 200,
-    rows: [],
-  });
-  equal(await readSql("oura_daily_sleep", "document_id,day", other), {
-    status: 200,
-    rows: [],
-  });
-  const denied = await readSql("oura_nightly", "day,sleep_score");
-  equal([401, 403].includes(denied.status), true);
 });

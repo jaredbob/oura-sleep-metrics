@@ -4,7 +4,7 @@ import {
   endpoint,
   equal,
   fixture,
-  readSql,
+  readOuraRows,
   required,
   runWorker,
   signedNotification,
@@ -77,13 +77,11 @@ async function notify(
 }
 
 async function nightly(day: string): Promise<unknown[]> {
-  const { status, rows } = await readSql(
+  const rows = await readOuraRows(
     "oura_nightly",
     "day,sleep_score",
-    required("TEST_OURA_OWNER_ACCESS_TOKEN"),
   );
-  equal(status, 200);
-  return rows.filter((row: { day: string }) => row.day === day);
+  return rows.filter((row) => row.day === day);
 }
 
 async function worker() {

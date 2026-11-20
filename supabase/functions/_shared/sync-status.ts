@@ -8,6 +8,7 @@ type ImportJob = {
   status: "complete" | "pending" | "retryable";
   pages_imported: number;
   updated_at: Date | null;
+  retry_reason?: "consent_required";
 };
 
 type DeliveryCounts = {
@@ -17,8 +18,12 @@ type DeliveryCounts = {
 };
 
 export async function getConnectionStatus(ownerId: string) {
-  const [connection] = await sql()`
-    select status, connected_at
+  const [connection] = await sql()<{
+    status: string;
+    connected_at: Date;
+    missing_scopes: string[];
+  }[]>`
+    select status, connected_at, missing_scopes
     from oura_private.connections where owner_id = ${ownerId}
   `;
   if (!connection) {
@@ -62,8 +67,15 @@ export async function getConnectionStatus(ownerId: string) {
     subscriptions.filter(({ retry_reason }) => retry_reason !== null)
       .map(({ collection }) => collection),
   );
+  const consentRequired = new Set(
+    collections.filter(({ scope }) =>
+      scope && connection.missing_scopes.includes(scope)
+    ).map(({ name }) => name),
+  );
   const imports: ImportJob[] = jobs.map((job) =>
-    registrationFailures.has(job.collection)
+    consentRequired.has(job.collection)
+      ? { ...job, status: "retryable", retry_reason: "consent_required" }
+      : registrationFailures.has(job.collection)
       ? { ...job, status: "retryable" }
       : job
   );

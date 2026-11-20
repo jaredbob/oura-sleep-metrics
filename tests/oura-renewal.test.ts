@@ -3,7 +3,7 @@ import {
   command,
   equal,
   fixture,
-  readSql,
+  readOuraRows,
   required,
   runWorker,
 } from "./oura-test-support.ts";
@@ -139,9 +139,8 @@ Deno.test("The scheduled worker renews Oura subscriptions, reports failures, and
       recovered.webhooks.deliveries.failed,
     ], [0, 0]);
     equal(recovered.history, before.history);
-    const nightly = await readSql("oura_nightly", "day,sleep_score", owner);
-    equal(nightly.status, 200);
-    equal(nightly.rows.find((row: { day: string }) => row.day === day), {
+    const nightly = await readOuraRows("oura_nightly", "day,sleep_score");
+    equal(nightly.find((row) => row.day === day), {
       day,
       sleep_score: 89,
     });

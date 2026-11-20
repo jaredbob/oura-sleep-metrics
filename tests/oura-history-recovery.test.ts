@@ -4,7 +4,7 @@ import {
   endpoint,
   equal,
   fixture,
-  readSql,
+  readOuraRows,
   required,
 } from "./oura-test-support.ts";
 
@@ -54,7 +54,7 @@ Deno.test("History resumes after the provider rejects a saved cursor or returns 
   equal(collectionStatus(interrupted, "daily_readiness"), ["retryable", 0]);
   equal(collectionStatus(interrupted, "daily_spo2"), ["complete", 1]);
   equal(
-    (await readSql("oura_nightly", "sleep_score,readiness_score", owner)).rows,
+    await readOuraRows("oura_nightly", "sleep_score,readiness_score"),
     [
       { sleep_score: 82, readiness_score: 91 },
     ],
@@ -76,7 +76,7 @@ Deno.test("History resumes after the provider rejects a saved cursor or returns 
   equal(collectionStatus(jobs, "daily_readiness"), ["complete", 1]);
   equal(collectionStatus(jobs, "daily_spo2"), ["complete", 1]);
   equal(
-    (await readSql("oura_nightly", "sleep_score,readiness_score", owner)).rows,
+    await readOuraRows("oura_nightly", "sleep_score,readiness_score"),
     [
       { sleep_score: 93, readiness_score: 88 },
     ],
